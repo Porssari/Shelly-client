@@ -207,7 +207,7 @@ function getSecondsUntilNextQuarter() {
     CurrentHourUnixtime = CurrentHourUnixtime * 3600;
     let CurrentSecondsOverHour = CurrentUnixTime - CurrentHourUnixtime;
     let SecondsUntilNextQuarter = (NextQuarterMinute * 60) - CurrentSecondsOverHour;
-    return SecondsUntilNextQuarter + 1;
+    return SecondsUntilNextQuarter + 5;
 }
 
 //Timer called control function for getControls
