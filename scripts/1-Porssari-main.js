@@ -4,7 +4,7 @@ let CurrentMinute = 0;
 let CurrentUnixTime = 0;
 let Mac = '';
 let DeviceChannels = 0;
-let ScriptVersion = "Shelly-1.0-rc1";
+let ScriptVersion = "Shelly-1.0";
 
 let StatusOk = false;
 let ControlsReady = false;
@@ -154,34 +154,36 @@ UpdateStatus();
 DoControlsTimerArmed = false;
 };
 
+let CurrentHourString = JSON.stringify(CurrentHour);
+
 if (DeviceChannels >= 1) {
-    if (ControlsJson.Channel1[CurrentHour] === "1") {
+    if (ControlsJson.Channel1[CurrentHourString] === "1") {
     Switch0.turnOn();
-    } else if (ControlsJson.Channel1[CurrentHour] === "0") {
+    } else if (ControlsJson.Channel1[CurrentHourString] === "0") {
     Switch0.turnOff();
     };
 };
 
 if (DeviceChannels >= 2) {
-    if (ControlsJson.Channel2[CurrentHour] === "1") {
+    if (ControlsJson.Channel2[CurrentHourString] === "1") {
     Switch1.turnOn();
-    } else if (ControlsJson.Channel2[CurrentHour] === "0") {
+    } else if (ControlsJson.Channel2[CurrentHourString] === "0") {
     Switch1.turnOff();
     };
 };
 
 if (DeviceChannels >= 3) {
-    if (ControlsJson.Channel3[CurrentHour] === "1") {
+    if (ControlsJson.Channel3[CurrentHourString] === "1") {
     Switch2.turnOn();
-    } else if (ControlsJson.Channel3[CurrentHour] === "0") {
+    } else if (ControlsJson.Channel3[CurrentHourString] === "0") {
     Switch2.turnOff();
     };
 };
 
 if (DeviceChannels >= 4) {
-    if (ControlsJson.Channel4[CurrentHour] === "1") {
+    if (ControlsJson.Channel4[CurrentHourString] === "1") {
     Switch3.turnOn();
-    } else if (ControlsJson.Channel4[CurrentHour] === "0") {
+    } else if (ControlsJson.Channel4[CurrentHourString] === "0") {
     Switch3.turnOff();
     };
 };

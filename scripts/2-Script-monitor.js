@@ -7,7 +7,7 @@ let CONFIG = {
     UpdateFrequence: 2 * 60000,
     MonitorScript1: true,
     MonitoredScript1: "1",
-    MonitorScript2: false,
+    MonitorScript2: true,
     MonitoredScript2: "2",
 };
  
