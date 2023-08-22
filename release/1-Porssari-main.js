@@ -120,6 +120,7 @@ Shelly.call("HTTP.GET", { url: urlToCall, timeout: 20, ssl_ca:"*" },
 			
             if (res.code === 200) {
                 print('Get controls succesful. Code 200.');
+				ControlsJson = JSON.parse('{}');
                 ControlsJson = JSON.parse(res.body);
                 print('Controls JSON parsed.');
 				DeviceChannels = JSON.parse(ControlsJson.Metadata.Channels);
