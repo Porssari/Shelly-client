@@ -4,7 +4,7 @@ let CurrentMinute = 0;
 let CurrentUnixTime = 0;
 let Mac = '';
 let DeviceChannels = 0;
-let ScriptVersion = "Shelly-1.0";
+let ScriptVersion = "Shelly-2.0_beta1";
 let ShellyVersion = '';
 
 let StatusOk = false;
