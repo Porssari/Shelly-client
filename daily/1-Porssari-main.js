@@ -128,8 +128,8 @@ Shelly.call("HTTP.GET", { url: urlToCall, timeout: 20, ssl_ca:"*" },
       ControlsJson = JSON.parse(res.body);
       print('Controls JSON parsed.');
 			DeviceChannels = ControlsJson.Metadata.Channels;
-			LastRequest = ControlsJson.Metadata.Timestamp;
-			HoursLeftOnJson = ControlsJson.Metadata.Hours_count;
+			LastRequest = JSON.parse(ControlsJson.Metadata.Timestamp);
+			HoursLeftOnJson = JSON.parse(ControlsJson.Metadata.Hours_count);
 			print('Device controlled channels: ', DeviceChannels);
 			print('Control hours in buffer: ', HoursLeftOnJson);
 			doControls(false);
