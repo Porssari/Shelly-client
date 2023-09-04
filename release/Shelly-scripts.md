@@ -1,4 +1,4 @@
-porssari-main-script.js: Porssari main script
+porssari-main-script-legacy.js: Porssari main script
 ===
 Main script for porssari.fi device control
 
