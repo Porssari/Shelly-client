@@ -1,7 +1,7 @@
-porssari-main.js: Porssari main script
+porssari-main-script.js: Porssari main script
 ===
 Main script for porssari.fi device control
 
-script-monitor.js: Porssari script monitoring
+porssari-monitor-script.js: Porssari monitoring script
 ===
 Monitors that main script is running and starts script if needed
