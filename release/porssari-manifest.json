@@ -1,6 +1,6 @@
 [
   {
-    "fname": "porssari-main-script.js",
+    "fname": "porssari-main-script-legacy.js",
     "title": "Pörssärin ohjausskripti",
     "description": "(Toimii laiteohjelmiston versiosta 0.0.14 lähtien)"
   },
