@@ -125,15 +125,6 @@ function getControls() {
   print('Main cycles until next request: ', CyclesUntilRequest);
 }
 
-//Timer called control function for getControls
-function getControlsCall() {
-	//If status OK and over 60 seconds until next quarter, call getControls
-  if (StatusOk  === true && getSecondsUntilNextQuarter() > 60) {
-    	getControls();
-  }
-  GetcontrolsTimerArmed = false;
-}
-
 function MainCycle() {
   
   // Update time
