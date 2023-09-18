@@ -15,12 +15,10 @@ let GetcontrolsInit = false;
 let LastRequest = 0;
 let JsonValidUntil = 0;
 let ControlsJson = '{}';
-let DoControlsTimerArmed = false;
-let GetcontrolsTimerArmed = false;
 
 let MainTimer = null;
 let MainCycleCounter = 0;
-let CyclesUntilRequest = 18 + Math.floor(3 * Math.random());
+let CyclesUntilRequest = 20;
 
 //Prototype switch object
 let ShellySwitch = {
