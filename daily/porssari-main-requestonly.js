@@ -44,6 +44,7 @@ let Switch0 = getSwitch(0);
 let Switch1 = getSwitch(1);
 let Switch2 = getSwitch(2);
 let Switch3 = getSwitch(3);
+let Switch100 = getSwitch(100); 
 
 //Functions
 function CheckMac() {
@@ -53,10 +54,10 @@ function CheckMac() {
     }
 }
 
-//Get status (Mac address and current time)
+//Get current time and check if json is still valid
 function UpdateStatus() {
  
-  print('Getting Shelly Time. Controls timer arming if needed.');
+  print('Getting Shelly Time. Reboot if json schedule is empty');
   
   // Update global time variables
   let CurTime = new Date(Date.now());
@@ -70,20 +71,6 @@ function UpdateStatus() {
     print("Control schedule empty. Rebooting Shelly.");
 	Shelly.call("Shelly.Reboot");
   }
-
-  //Arm controls timer if not armed
-  if (DoControlsTimerArmed === false && ControlsReady === true) {
-    let SecondsUntilNextQuarter = 900;
-
-    SecondsUntilNextQuarter = getSecondsUntilNextQuarter();
-              
-    print('Arming controls timer (sec): ', SecondsUntilNextQuarter);
-              
-    Timer.set(SecondsUntilNextQuarter * 1000, false, function (ud) {
-      //doControls(true);
-    }, null);
-		DoControlsTimerArmed = true;
-  };
 }
 
 //Get controls JSON
