@@ -12,9 +12,11 @@ let DeviceChannels = 0;
 let StatusOk = false;
 let ControlsReady = false;
 let GetcontrolsInit = false;
+let DoControlsInit = false;
 let LastRequest = 0;
 let JsonValidUntil = 0;
 let ControlsJson = '{}';
+const ChannelLastControls = {ch0: 0, ch1: 0, ch2: 0, ch3: 0, ch100: 0};
 
 let MainTimer = null;
 let MainCycleCounter = 0;
@@ -47,6 +49,8 @@ let Switch3 = getSwitch(3);
 let Switch100 = getSwitch(100); 
 
 //Functions
+
+//Check mac validity
 function CheckMac() {
     if (Mac.length > 0) {
       StatusOk = true;
@@ -118,28 +122,87 @@ function getControls() {
   };
   print('URL: ', urlToCall);
 
-  Shelly.call("HTTP.GET", { url: urlToCall, timeout: 20, ssl_ca:"*" }, ParseHttpResponse);
+  Shelly.call("HTTP.GET", { url: urlToCall, timeout: 15, ssl_ca:"*" }, ParseHttpResponse);
   
   CyclesUntilRequest = 18 + Math.floor(3 * Math.random());
   MainCycleCounter = 0;
   print('Main cycles until next request: ', CyclesUntilRequest);
 }
 
-function MainCycle() {
+//Do controls
+function doControls() {
+
+  print('Executing controls.');
+
+
   
-  // Update time
-  UpdateStatus();
-        
-  //Get controls once in this timer to speed things up after bootup. Later controls updated at slower cycle timer
-  if (MainCycleCounter === CyclesUntilRequest || GetcontrolsInit === false) {
+
+  if (DoControlsInit === true) {
+    //Check if current timestamp is past next control timestamp and doing controls
+    
+	
+  } else {
+	//Controls not initialized (bootup): Getting channels current states from control-json and making controls
+	
+    DoControlsInit = true;
+  };
+
+  let CurrentHourString = JSON.stringify(CurrentHour);
+
+  if (DeviceChannels >= 1) {
+    if (ControlsJson.Channel1[CurrentHourString] === "1") {
+      Switch0.turnOn();
+    } else if (ControlsJson.Channel1[CurrentHourString] === "0") {
+      Switch0.turnOff();
+    };
+  };
+
+  if (DeviceChannels >= 2) {
+    if (ControlsJson.Channel2[CurrentHourString] === "1") {
+      Switch1.turnOn();
+    } else if (ControlsJson.Channel2[CurrentHourString] === "0") {
+      Switch1.turnOff();
+    };
+  };
+
+  if (DeviceChannels >= 3) {
+    if (ControlsJson.Channel3[CurrentHourString] === "1") {
+      Switch2.turnOn();
+    } else if (ControlsJson.Channel3[CurrentHourString] === "0") {
+      Switch2.turnOff();
+    };
+  };
+
+  if (DeviceChannels >= 4) {
+    if (ControlsJson.Channel4[CurrentHourString] === "1") {
+      Switch3.turnOn();
+    } else if (ControlsJson.Channel4[CurrentHourString] === "0") {
+      Switch3.turnOff();
+    };
+  };
+}
+
+
+function MainCycle() {
+       
+  //Get controls once when controls not initialized (after bootup). Later controls updated at slower cycle
+  if (MainCycleCounter >= CyclesUntilRequest || GetcontrolsInit === false) {
 	getControls();
     GetcontrolsInit = true;
   }
+  
+  //Update time
+  UpdateStatus();
+  
+  //Do controls
+  doControls();
+  
   MainCycleCounter++;
   print('Cycles done: ', MainCycleCounter, ', next request after ', CyclesUntilRequest, ' cycles.');
 }
 
-//Main cycle
+//Check mac validity
 CheckMac();
 
+//Main cycle timer
 mainTimer = Timer.set(15000, true, MainCycle);
