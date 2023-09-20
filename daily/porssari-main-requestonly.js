@@ -16,37 +16,13 @@ let DoControlsInit = false;
 let LastRequest = 0;
 let JsonValidUntil = 0;
 let ControlsJson = '{}';
-const ChannelLastControls = {ch0: 0, ch1: 0, ch2: 0, ch3: 0, ch100: 0};
+//let ChannelLastControlTimeStamp = {ch0: 0, ch1: 0, ch2: 0, ch3: 0, ch100: 0};
+let ChannelLastControlTimeStamps = [];
 
 let MainTimer = null;
 let MainCycleCounter = 0;
 let CyclesUntilRequest = 20;
 
-//Prototype switch object
-let ShellySwitch = {
-  turnOn: function () {
-    Shelly.call("Switch.Set", { id: this.id, on: true }, null, null);
-    print('Switch id ', this.id, 'set ON.');
-  },
-  turnOff: function () {
-    Shelly.call("Switch.Set", { id: this.id, on: false }, null, null);
-    print('Switch id ', this.id, 'set OFF.');
-  },
-};
-
-//Create switch object
-function getSwitch(id) {
-  let o = Object.create(ShellySwitch);
-  o.id = id;
-  return o;
-}
-
-//Declare switches
-let Switch0 = getSwitch(0);
-let Switch1 = getSwitch(1);
-let Switch2 = getSwitch(2);
-let Switch3 = getSwitch(3);
-let Switch100 = getSwitch(100); 
 
 //Functions
 
@@ -91,12 +67,11 @@ function ParseHttpResponse(res, error_code, error_msg, ud) {
       DeviceChannels = ControlsJson.Metadata.Channels;
 	  LastRequest = JSON.parse(ControlsJson.Metadata.Timestamp);
 	  JsonValidUntil = JSON.parse(ControlsJson.Metadata.Valid_until);
-	  ApiEndpoint = ControlsJson.Metadata.Fetch_url;
+	  //ApiEndpoint = ControlsJson.Metadata.Fetch_url;
 	  print('Device controlled channels: ', DeviceChannels);
 	  print('Control json valid until: ', JsonValidUntil);
 	  print('Api endpoint: ', ApiEndpoint);
-	  //doControls(false);
-      //ControlsReady = true;
+      GetcontrolsInit = true;
     } else if (res.code === 400) {
 	  print('Get controls failed. Bad request. Code: ', res.code);
 	} else if (res.code === 429) {
@@ -134,52 +109,74 @@ function doControls() {
 
   print('Executing controls.');
 
-
-  
-
   if (DoControlsInit === true) {
     //Check if current timestamp is past next control timestamp and doing controls
     
+	//Loop through channels
+	for (var channel in ControlsJson.controls) {
+        if (ControlsJson.controls.hasOwnProperty(channel)) {
+			let SwitchId = ControlsJson.controls[channel].id - 1;
+		
+			//Loop through schedules
+			for (var ScheduleEntry in ControlsJson.controls[channel].schedules) {
+				if (ControlsJson.controls[channel].schedules.hasOwnProperty(ScheduleEntry)) {
+					//If current timestamp is greater or equal than schedule entrys timestamp then check if control already done
+					if (CurrentUnixTime >= ControlsJson.controls[channel].schedules[ScheduleEntry].timestamp) {
+						if (ControlsJson.controls[channel].schedules[ScheduleEntry].timestamp > ChannelLastControlTimeStamps[SwitchId]) {
+							//Control switch and update last control timestamp
+							if (ControlState == 1) {
+								controlSwitch(SwitchId, true);
+								ChannelLastControlTimeStamps[SwitchId] = ControlsJson.controls[channel].schedules[ScheduleEntry].timestamp;
+							} else if (ControlState == 0) {
+								controlSwitch(SwitchId, false);
+								ChannelLastControlTimeStamps[SwitchId] = ControlsJson.controls[channel].schedules[ScheduleEntry].timestamp;
+							};
+						};
+					};
+					
+				
+				}
+			}
+		
+		}
+    }
+	
 	
   } else {
 	//Controls not initialized (bootup): Getting channels current states from control-json and making controls
+	print('Initializing controls to current states.');
 	
+	for (var channel in ControlsJson.controls) {
+        if (ControlsJson.controls.hasOwnProperty(channel)) {
+			let SwitchId = ControlsJson.controls[channel].id - 1;
+			let ControlState = ControlsJson.controls[channel].state;
+			
+			if (ControlState == 1) {
+				controlSwitch(SwitchId, true);
+			} else if (ControlState == 0) {
+				controlSwitch(SwitchId, false);
+			};
+			
+        }
+    }
     DoControlsInit = true;
   };
 
-  let CurrentHourString = JSON.stringify(CurrentHour);
+  print('Controls done.');
 
-  if (DeviceChannels >= 1) {
-    if (ControlsJson.Channel1[CurrentHourString] === "1") {
-      Switch0.turnOn();
-    } else if (ControlsJson.Channel1[CurrentHourString] === "0") {
-      Switch0.turnOff();
-    };
-  };
+}
 
-  if (DeviceChannels >= 2) {
-    if (ControlsJson.Channel2[CurrentHourString] === "1") {
-      Switch1.turnOn();
-    } else if (ControlsJson.Channel2[CurrentHourString] === "0") {
-      Switch1.turnOff();
-    };
-  };
+//Control switches
+function controlSwitch(SwitchId, ControlState) {
+	
+	Shelly.call("Switch.Set", { id: SwitchId, on: ControlState }, null, null);
+  
+	if (ControlState === true) {
+		print('Switch id ', SwitchId, 'set ON.');
+	} else {
+		print('Switch id ', SwitchId, 'set OFF.');
+	};
 
-  if (DeviceChannels >= 3) {
-    if (ControlsJson.Channel3[CurrentHourString] === "1") {
-      Switch2.turnOn();
-    } else if (ControlsJson.Channel3[CurrentHourString] === "0") {
-      Switch2.turnOff();
-    };
-  };
-
-  if (DeviceChannels >= 4) {
-    if (ControlsJson.Channel4[CurrentHourString] === "1") {
-      Switch3.turnOn();
-    } else if (ControlsJson.Channel4[CurrentHourString] === "0") {
-      Switch3.turnOff();
-    };
-  };
 }
 
 
@@ -188,14 +185,16 @@ function MainCycle() {
   //Get controls once when controls not initialized (after bootup). Later controls updated at slower cycle
   if (MainCycleCounter >= CyclesUntilRequest || GetcontrolsInit === false) {
 	getControls();
-    GetcontrolsInit = true;
   }
   
   //Update time
   UpdateStatus();
   
+  if (GetcontrolsInit === true) {
   //Do controls
   doControls();
+  };
+  
   
   MainCycleCounter++;
   print('Cycles done: ', MainCycleCounter, ', next request after ', CyclesUntilRequest, ' cycles.');
