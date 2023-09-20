@@ -84,6 +84,8 @@ function ParseHttpResponse(res, error_code, error_msg, ud) {
 	  print('Get controls failed. Code: ', res.code);
     }
   }
+  
+  ControlsReady = true;
 }
 
 function getControls() {
@@ -184,13 +186,14 @@ function MainCycle() {
        
   //Get controls once when controls not initialized (after bootup). Later controls updated at slower cycle
   if (MainCycleCounter >= CyclesUntilRequest || GetcontrolsInit === false) {
+	ControlsReady = false;
 	getControls();
   }
   
   //Update time
   UpdateStatus();
   
-  if (GetcontrolsInit === true) {
+  if (GetcontrolsInit === true && ControlsReady === true) {
   //Do controls
   doControls();
   };
