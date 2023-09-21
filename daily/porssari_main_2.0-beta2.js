@@ -142,7 +142,7 @@ function doControls() {
 						if (STATE.currentUnixTime >= STATE.controlsJson.controls[channel].schedules[ScheduleEntry].timestamp) {
 							if (STATE.controlsJson.controls[channel].schedules[ScheduleEntry].timestamp > STATE.channelLastControlTimeStamps[SwitchId]) {
 								//Control switch and update last control timestamp
-								let ControlState = STATE.controlsJson.controls[channel].state;
+								let ControlState = STATE.controlsJson.controls[channel].schedules[ScheduleEntry].state;
 								if (ControlState == 1) {
 									controlSwitch(SwitchId, true);
 									STATE.channelLastControlTimeStamps[SwitchId] = STATE.controlsJson.controls[channel].schedules[ScheduleEntry].timestamp;
