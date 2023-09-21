@@ -170,7 +170,8 @@ function doControls() {
 				controlSwitch(SwitchId, true);
 			} else if (ControlState == 0) {
 				controlSwitch(SwitchId, false);
-			};	
+			};
+			STATE.channelLastControlTimeStamps[SwitchId] = STATE.currentUnixTime;	
         }
     }
     STATE.doControlsInit = true;
