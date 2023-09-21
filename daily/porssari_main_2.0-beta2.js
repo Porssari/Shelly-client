@@ -78,14 +78,14 @@ function ParseHttpResponse(res, error_code, error_msg, ud) {
 	} else {
 		// Parse response
 		if (res.code === 200) {
-			requestInfo = 'Get controls succesful. Code 200.';
+			requestInfo = 'Get controls successful. Code 200.';
 			STATE.controlsJson = '{}';
 			STATE.controlsJson = JSON.parse(res.body);
-			CONFIG.deviceChannels = STATE.controlsJson.Metadata.Channels;
-			STATE.lastRequest = JSON.parse(STATE.controlsJson.Metadata.Timestamp);
-			STATE.jsonValidUntil = JSON.parse(STATE.controlsJson.Metadata.Valid_until);
+			CONFIG.deviceChannels = STATE.controlsJson.metadata.channels;
+			STATE.lastRequest = JSON.parse(STATE.controlsJson.metadata.timestamp);
+			STATE.jsonValidUntil = JSON.parse(STATE.controlsJson.metadata.valid_until);
 			STATE.lastRequestHttpCode = res.code;
-			//CONFIG.apiEndpoint = ControlsJson.Metadata.Fetch_url;
+			CONFIG.apiEndpoint = STATE.controlsJson.metadata.fetch_url;
 			print('Controls JSON parsed.');
 			print('Device controlled channels: ', CONFIG.deviceChannels);
 			print('Control json valid until: ', STATE.jsonValidUntil);
@@ -155,6 +155,7 @@ function doControls() {
 							};
 						//If channel settings changed after last control then set switch to current state
 						} else if (STATE.controlsJson.controls[channel].updated > STATE.channelLastControlTimeStamps[SwitchId]) {
+							print('Switch id ', SwitchId, ' user settings changed after last control. Controlling to current state.');
 							let ControlState = STATE.controlsJson.controls[channel].state;
 							if (ControlState == 1) {
 								controlSwitch(SwitchId, true);
