@@ -1,15 +1,17 @@
 //Init variables
-let VERSION = "Shelly-2.0_beta2";
+let VERSION = "Shelly-2.0_beta1";
 print('Pörssäri Control Script ', VERSION)
 
 let CONFIG = {
-	apiEndpoint: "https://dev.porssari.fi/getcontrols_newjson.php",
+    updatePeriod: 15000, // Main cycle timer
+	apiEndpoint: "https://dev.porssari.fi/getcontrols_newjson.php", // Url for initial request, updated from json
 	shellyId: null,
 	shellyMac: null,
 	shellyFwVer: null,
 	deviceChannels: 0, // Updated during main cycle
 	returnTimestamps: 100, // Limit amount of schedule timestamps returned per channel
-	updatePeriod: 15000,
+	jsonVersion: 2, // 1=Legacy, 2=Schedule
+	jsonChannelNames: false, // Return channel friendly names if true
 };
 
 let STATE = {
@@ -115,7 +117,7 @@ function ParseHttpResponse(res, error_code, error_msg, ud) {
 function getControls() {
 	
 	print('Get controls-JSON.');
-	let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + CONFIG.shellyMac + "&last_request=" + JSON.stringify(STATE.lastRequest) + "&client=" + VERSION + "&shelly_fw=" + CONFIG.shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps;
+	let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + CONFIG.shellyMac + "&last_request=" + JSON.stringify(STATE.lastRequest) + "&client=" + VERSION + "&shelly_fw=" + CONFIG.shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps + "&json_version=" + CONFIG.jsonVersion + "&json_channel_names=" + CONFIG.jsonChannelNames;
 
 	print('URL: ', urlToCall);
 
