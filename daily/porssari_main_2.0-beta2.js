@@ -4,8 +4,8 @@ print('Pörssäri Control Script ', VERSION)
 
 let CONFIG = {
     updatePeriod: 15000, // Main cycle timer
-	apiEndpoint: "https://dev.porssari.fi/getcontrols_newjson.php", // Url for initial request, updated from json
-	shellyId: null,
+	apiEndpoint: "https://dev.porssari.fi/getcontrols.php", // Url for initial request, updated from json
+	shellyApp: null,
 	shellyMac: null,
 	shellyFwVer: null,
 	deviceChannels: 0, // Updated during main cycle
@@ -33,7 +33,7 @@ let STATE = {
 	
 // Read config values from Shelly
 Shelly.call("Shelly.GetDeviceInfo", {}, function (result) {
-	CONFIG.shellyId = result.id;
+	CONFIG.shellyApp = result.app;
 	CONFIG.shellyMac = result.mac;
 	CONFIG.shellyFwVer = result.ver;
 	CheckMac();
@@ -117,7 +117,7 @@ function ParseHttpResponse(res, error_code, error_msg, ud) {
 function getControls() {
 	
 	print('Get controls-JSON.');
-	let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + CONFIG.shellyMac + "&last_request=" + JSON.stringify(STATE.lastRequest) + "&client=" + VERSION + "&shelly_fw=" + CONFIG.shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps + "&json_version=" + CONFIG.jsonVersion + "&json_channel_names=" + CONFIG.jsonChannelNames;
+	let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + CONFIG.shellyMac + "&last_request=" + JSON.stringify(STATE.lastRequest) + "&script_version=" + VERSION + "&client_model=" + CONFIG.shellyApp + "&client_fw=" + CONFIG.shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps + "&json_version=" + CONFIG.jsonVersion + "&json_channel_names=" + CONFIG.jsonChannelNames;
 
 	print('URL: ', urlToCall);
 
@@ -140,7 +140,7 @@ function doControls() {
 				//Loop through schedules
 				for (var ScheduleEntry in STATE.controlsJson.controls[channel].schedules) {
 					if (STATE.controlsJson.controls[channel].schedules.hasOwnProperty(ScheduleEntry)) {
-					//If current timestamp is greater or equal than schedule entrys timestamp then check if control already done
+						//If current timestamp is greater or equal than schedule entrys timestamp then check if control already done
 						if (STATE.currentUnixTime >= STATE.controlsJson.controls[channel].schedules[ScheduleEntry].timestamp) {
 							if (STATE.controlsJson.controls[channel].schedules[ScheduleEntry].timestamp > STATE.channelLastControlTimeStamps[SwitchId]) {
 								//Control switch and update last control timestamp
@@ -153,6 +153,15 @@ function doControls() {
 									STATE.channelLastControlTimeStamps[SwitchId] = STATE.controlsJson.controls[channel].schedules[ScheduleEntry].timestamp;
 								};
 							};
+						//If channel settings changed after last control then set switch to current state
+						} else if (STATE.controlsJson.controls[channel].updated > STATE.channelLastControlTimeStamps[SwitchId]) {
+							let ControlState = STATE.controlsJson.controls[channel].state;
+							if (ControlState == 1) {
+								controlSwitch(SwitchId, true);
+							} else if (ControlState == 0) {
+								controlSwitch(SwitchId, false);
+							};
+							STATE.channelLastControlTimeStamps[SwitchId] = STATE.currentUnixTime;	
 						};
 					}
 				}
