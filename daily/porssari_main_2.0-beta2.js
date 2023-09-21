@@ -1,5 +1,5 @@
 //Init variables
-let VERSION = "Shelly-2.0_beta2";
+let VERSION = "Shelly-2.0_rc1";
 print('Pörssäri Control Script ', VERSION)
 
 let CONFIG = {
