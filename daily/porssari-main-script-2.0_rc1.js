@@ -3,7 +3,7 @@ let VERSION = "Shelly-2.0_rc1";
 print('Pörssäri Control Script ', VERSION)
 
 let CONFIG = {
-    updatePeriod: 15000, // Main cycle timer
+	updatePeriod: 15000, // Main cycle timer
 	apiEndpoint: "https://dev.porssari.fi/getcontrols.php", // Url for initial request, updated from json
 	shellyApp: null,
 	shellyMac: null,
@@ -39,23 +39,21 @@ Shelly.call("Shelly.GetDeviceInfo", {}, function (result) {
 	CheckMac();
 });
 
-//let ChannelLastControlTimeStamp = {ch0: 0, ch1: 0, ch2: 0, ch3: 0, ch100: 0};
 //Functions
-
 //Check mac validity
 function CheckMac() {
-    if (CONFIG.shellyMac.length > 0) {
+	if (CONFIG.shellyMac.length > 0) {
 		print('Device info: id ', CONFIG.shellyMac, ', firmware version ', CONFIG.shellyFwVer);
-    } else {
-        print('Could not get valid device-id, rebooting.');
+	} else {
+		print('Could not get valid device-id, rebooting.');
 		Shelly.call("Shelly.Reboot");
-    }
+	}
 }
 
 //Get current time and check if json is still valid
 function UpdateStatus() {
 	print('Getting Shelly Time. Reboot if json schedule is empty');
-  
+
 	// Update global time variables
 	let curTime = new Date(Date.now());
 	let timestampMillis = Date.now();      
@@ -72,7 +70,7 @@ function UpdateStatus() {
 
 //Get controls JSON
 function ParseHttpResponse(res, error_code, error_msg, ud) {
-    let requestInfo = null;
+	let requestInfo = null;
 	if (error_code != 0) {
 		print("Request error: ", error_code, error_msg);
 	} else {
@@ -115,10 +113,8 @@ function ParseHttpResponse(res, error_code, error_msg, ud) {
 }
 
 function getControls() {
-	
 	print('Get controls-JSON.');
 	let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + CONFIG.shellyMac + "&last_request=" + JSON.stringify(STATE.lastRequest) + "&script_version=" + VERSION + "&client_model=" + CONFIG.shellyApp + "&client_fw=" + CONFIG.shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps + "&json_version=" + CONFIG.jsonVersion + "&json_channel_names=" + CONFIG.jsonChannelNames;
-
 	print('URL: ', urlToCall);
 
 	Shelly.call("HTTP.GET", { url: urlToCall, timeout: 10, ssl_ca:"*" }, ParseHttpResponse);
@@ -126,23 +122,22 @@ function getControls() {
 
 //Do controls
 function doControls() {
-
 	print('Executing controls.');
-
 	if (STATE.doControlsInit === true) {
 		//Check if current timestamp is past next control timestamp and doing controls
-    
-		//Loop through channels
+    	//Loop through channels
 		for (var channel in STATE.controlsJson.controls) {
 			if (STATE.controlsJson.controls.hasOwnProperty(channel)) {
 				let SwitchId = STATE.controlsJson.controls[channel].id - 1;
-		
+				
 				//Loop through schedules
 				for (var ScheduleEntry in STATE.controlsJson.controls[channel].schedules) {
 					if (STATE.controlsJson.controls[channel].schedules.hasOwnProperty(ScheduleEntry)) {
+						
 						//If current timestamp is greater or equal than schedule entrys timestamp then check if control already done
 						if (STATE.currentUnixTime >= STATE.controlsJson.controls[channel].schedules[ScheduleEntry].timestamp) {
 							if (STATE.controlsJson.controls[channel].schedules[ScheduleEntry].timestamp > STATE.channelLastControlTimeStamps[SwitchId]) {
+								
 								//Control switch and update last control timestamp
 								let ControlState = STATE.controlsJson.controls[channel].schedules[ScheduleEntry].state;
 								if (ControlState == 1) {
@@ -153,6 +148,7 @@ function doControls() {
 									STATE.channelLastControlTimeStamps[SwitchId] = STATE.controlsJson.controls[channel].schedules[ScheduleEntry].timestamp;
 								};
 							};
+						
 						//If channel settings changed after last control then set switch to current state
 						} else if (STATE.controlsJson.controls[channel].updated > STATE.channelLastControlTimeStamps[SwitchId]) {
 							print('Switch id ', SwitchId, ' user settings changed after last control. Controlling to current state.');
@@ -168,72 +164,63 @@ function doControls() {
 				}
 			}
 		}
-	
 	} else {
-	//Controls not initialized (bootup): Getting channels current states from control-json and making controls
-	print('Initializing controls to current states.');
-	
-	for (var channel in STATE.controlsJson.controls) {
-        if (STATE.controlsJson.controls.hasOwnProperty(channel)) {
-			let SwitchId = STATE.controlsJson.controls[channel].id - 1;
-			let ControlState = STATE.controlsJson.controls[channel].state;
+		//Controls not initialized (bootup): Getting channels current states from control-json and making controls
+		print('Initializing controls to current states.');
+		
+		for (var channel in STATE.controlsJson.controls) {
+			if (STATE.controlsJson.controls.hasOwnProperty(channel)) {
+				let SwitchId = STATE.controlsJson.controls[channel].id - 1;
+				let ControlState = STATE.controlsJson.controls[channel].state;
 			
-			if (ControlState == 1) {
-				controlSwitch(SwitchId, true);
-			} else if (ControlState == 0) {
-				controlSwitch(SwitchId, false);
-			};
-			STATE.channelLastControlTimeStamps[SwitchId] = STATE.currentUnixTime;	
-        }
-    }
-    STATE.doControlsInit = true;
-  };
-
-  print('Controls done.');
-
+				if (ControlState == 1) {
+					controlSwitch(SwitchId, true);
+				} else if (ControlState == 0) {
+					controlSwitch(SwitchId, false);
+				};
+				STATE.channelLastControlTimeStamps[SwitchId] = STATE.currentUnixTime;	
+			}
+		}
+		STATE.doControlsInit = true;
+	};
+	print('Controls done.');
 }
 
 //Control switches
 function controlSwitch(SwitchId, setState) {
-	
 	Shelly.call("Switch.Set", { id: SwitchId, on: setState }, null, null);
-  
 	if (setState === true) {
 		print('Switch id ', SwitchId, 'set ON.');
 	} else {
 		print('Switch id ', SwitchId, 'set OFF.');
 	};
-
 }
 
-
 function MainCycle() {
-       
 	//Get controls once when controls not initialized (after bootup). Later controls updated at slower cycle. 
 	if (STATE.getcontrolsInit === false) {
 		print('Initial controls data not fetched from server, impossible to do controls');
 		getControls();
-	}	
-  
+	}
+	
 	if (STATE.getcontrolsInit === true) {
-	  
-	    print('Cycle ', STATE.mainCycleCounter, '/', STATE.cyclesUntilRequest, ' until next request.');
-    
-        //Update time
-	    UpdateStatus();
+		
+		print('Cycle ', STATE.mainCycleCounter, '/', STATE.cyclesUntilRequest, ' until next request.');
+		
+		//Update time
+		UpdateStatus();
 		
 		// Do controls
 		if (STATE.controlsReady === true) {
 			doControls();
 		};
-  
+		
 		// Update controls json
 		if (STATE.mainCycleCounter >= STATE.cyclesUntilRequest) {
 			STATE.controlsReady = false;
 			getControls();
 		};
 	}
-  
 	STATE.mainCycleCounter++;
 }
 
