@@ -9,7 +9,7 @@ let CONFIG = {
 	shellyMac: null,
 	shellyFwVer: null,
 	deviceChannels: 0, // Updated during main cycle
-	returnTimestamps: 100, // Limit amount of schedule timestamps returned per channel
+	returnTimestamps: 10, // Limit amount of schedule timestamps returned per channel
 	jsonVersion: 2, // 1=Legacy, 2=Schedule
 	jsonChannelNames: false, // Return channel friendly names if true
 };
