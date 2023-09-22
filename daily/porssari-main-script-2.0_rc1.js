@@ -1,5 +1,5 @@
 //Init variables
-let VERSION = "Shelly-2.0_rc1";
+let VERSION = "Shelly-2.0_rc2";
 print('Pörssäri Control Script ', VERSION)
 
 let CONFIG = {
@@ -27,7 +27,7 @@ let STATE = {
 	jsonValidUntil: 0,
 	controlsJson: '{}',
 	channelLastControlTimeStamps: [],
-	mainCycleCounter: 0,
+	mainCycleCounter: 20, // Full counter to get json when Shelly is booting
 	cyclesUntilRequest: 20, // Set initial value here, updated during main cycle
 };
 	
@@ -197,17 +197,12 @@ function controlSwitch(SwitchId, setState) {
 }
 
 function MainCycle() {
-	//Get controls once when controls not initialized (after bootup). Later controls updated at slower cycle. 
-	if (STATE.getcontrolsInit === false) {
-		print('Initial controls data not fetched from server, impossible to do controls');
-		getControls();
-	}
 	
+	print('Cycle ', STATE.mainCycleCounter, '/', STATE.cyclesUntilRequest, ' until next request.');
+
 	if (STATE.getcontrolsInit === true) {
-		
-		print('Cycle ', STATE.mainCycleCounter, '/', STATE.cyclesUntilRequest, ' until next request.');
-		
-		//Update time
+	  
+	    //Update time
 		UpdateStatus();
 		
 		// Do controls
@@ -216,11 +211,16 @@ function MainCycle() {
 		};
 		
 		// Update controls json
-		if (STATE.mainCycleCounter >= STATE.cyclesUntilRequest) {
-			STATE.controlsReady = false;
-			getControls();
-		};
+		
+	} else {
+	    print('Initial controls data not fetched from server, impossible to do controls');
 	}
+	
+	if (STATE.mainCycleCounter >= STATE.cyclesUntilRequest) {
+	    STATE.controlsReady = false;
+		getControls();
+	};
+	
 	STATE.mainCycleCounter++;
 }
 
