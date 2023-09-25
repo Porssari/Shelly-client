@@ -1,3 +1,11 @@
+// Pörssäri-palvelun ohjausskripti
+// Lisää laitteesi sivuston https://www.porssari.fi laitehallintaan saadaksesi ohjaukset toimimaan
+// Ohjeita: https://docs.porssari.fi
+
+// Control script for Pörssäri control service
+// Add your device to https://www.porssari.fi to make controls functional
+// Instructions: https://docs.porssari.fi
+
 let VERSION = "Shelly-2.0";
 print('Pörssäri Control Script ', VERSION)
 
