@@ -1,4 +1,3 @@
-//Init variables
 let VERSION = "Shelly-2.0";
 print('Pörssäri Control Script ', VERSION)
 
@@ -48,7 +47,7 @@ function CheckMac() {
 }
 
 function UpdateStatus() {
-	print('Getting Shelly Time. Reboot if json schedule is empty');
+	print('Updating time variables. Reboot if control schedule is empty.');
 	let curTime = new Date(Date.now());
 	let timestampMillis = Date.now();      
 	STATE.currentUnixTime = Math.floor(timestampMillis / 1000);
@@ -179,10 +178,10 @@ function MainCycle() {
 			doControls();
 		};		
 	} else {
-	    print('Initial controls data not fetched from server, impossible to do controls');
+		print('Initial controls data not fetched from server, impossible to do controls.');
 	}	
 	if (STATE.mainCycleCounter >= STATE.cyclesUntilRequest) {
-	    STATE.controlsReady = false;
+		STATE.controlsReady = false;
 		getControls();
 	};	
 	STATE.mainCycleCounter++;
