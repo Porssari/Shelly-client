@@ -3,7 +3,7 @@ print('Pörssäri Control Script ', VERSION)
 
 let CONFIG = {
 	updatePeriod: 15000, 
-	apiEndpoint: "https://dev.porssari.fi/getcontrols.php", 
+	apiEndpoint: "https://api.porssari.fi/getcontrols.php", 
 	shellyApp: null,
 	shellyMac: null,
 	shellyFwVer: null,
