@@ -49,8 +49,7 @@ function CheckMac() {
 	if (CONFIG.shellyMac.length > 0) {
 		print('Device info: id ', CONFIG.shellyMac, ', firmware version ', CONFIG.shellyFwVer);
 	} else {
-		print('Could not get valid device-id, rebooting.');
-		Shelly.call("Shelly.Reboot");
+		print('Could not get valid device-id');
 	}
 }
 
