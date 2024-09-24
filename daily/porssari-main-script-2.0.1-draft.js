@@ -7,7 +7,7 @@
 // Instructions: https://docs.porssari.fi
 
 let VERSION = "Shelly-2.0.1";
-print('Pörssäri Control Script ', VERSION)
+print('Pörssäri Control Script ', VERSION);
 
 let CONFIG = {
 	updatePeriod: 15000, 
