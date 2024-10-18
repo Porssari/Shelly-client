@@ -1,0 +1,12 @@
+[
+  {
+    "fname": "porssari-main-script-rc.js",
+    "title": "Pörssärin ohjausskripti (demoversio)",
+    "description": "(Toimii laiteohjelmiston versiosta 1.0.3 lähtien)"
+  },
+  {
+    "fname": "porssari-monitor-script.js",
+    "title": "Pörssärin valvontaskripti, joka käynnistää ohjauksen tarvittaessa uudelleen mikäli ohjelma jostain syystä keskeytyy",
+    "description": "(Kaikille laiteohjelmistoversioille)"
+  }
+]
