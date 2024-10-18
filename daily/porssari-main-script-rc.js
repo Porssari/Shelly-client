@@ -6,7 +6,7 @@
 // Add your device to https://www.porssari.fi to make controls functional
 // Instructions: https://docs.porssari.fi
 
-let VERSION = "Shelly-2.0.1";
+let VERSION = "Shelly-2.0.1-demo";
 print('Pörssäri Control Script ', VERSION);
 
 let CONFIG = {
