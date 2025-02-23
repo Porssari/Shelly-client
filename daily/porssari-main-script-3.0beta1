@@ -248,7 +248,12 @@ function enqueueShellyCall(method, params, callback) {
 }
 
 function processShellyCallQueue() {
-    if (STATE.isCallBusy || STATE.shellyCallQueue.length === 0) {
+    if (STATE.shellyCallQueue.length === 0) {
+      return;
+    }
+    
+    if (STATE.isCallBusy) {
+        Timer.set(10000, false, processShellyCallQueue);
         return;
     }
 
