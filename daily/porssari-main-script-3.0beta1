@@ -1,0 +1,288 @@
+let VERSION = "Shelly-3.0-beta1";
+print('Pörssäri Control Script ', VERSION);
+
+let CONFIG = {
+    updatePeriod: 15000, 
+    apiEndpoint: "https://api.porssari.fi/getcontrols.php", 
+    shellyApp: null,
+    shellyMac: null,
+    shellyFwVer: null,
+    deviceChannels: 0,
+    returnTimestamps: 10, 
+    jsonVersion: 2, 
+    jsonChannelNames: false, 
+    storageType: null, // Tallennusvaihtoehto
+};
+
+let STATE = {
+    currentHour: 0,
+    currentMinute: 0,
+    currentUnixTime: 0,
+    deviceInfoOk: false,
+    controlsReady: false,
+    getcontrolsInit: false,
+    doControlsInit: false,
+    lastRequest: 0,
+    lastRequestHttpCode: null,
+    jsonValidUntil: 0,
+    channelLastControlTimeStamps: [],
+    mainCycleCounter: 20, 
+    cyclesUntilRequest: 20, 
+    shellyUptime: 0, // Uptime
+    shellyCallQueue: [], // Jono Shelly.Call -kutsuille
+    isCallBusy: false, // Merkkitieto siitä, onko Shelly.call käynnissä
+};
+
+Shelly.call("Shelly.GetDeviceInfo", {}, function (result) {
+    CONFIG.shellyApp = result.app;
+    CONFIG.shellyMac = result.mac;
+    CONFIG.shellyFwVer = result.ver;
+    CheckMac();
+    // Tarkistetaan firmware versio ja määritetään tallennustyyppi
+    if (parseFloat(CONFIG.shellyFwVer) >= 1.5) {
+        CONFIG.storageType = "ScriptStorage";  // Käytetään script.storagea
+        getUptime(); // Haetaan Shellyn uptime
+    } else {
+        CONFIG.storageType = "KVS";  // Käytetään KVS-storagea
+    }
+    LoadJson(); // Ladataan JSON, jos tallennuspaikka on tiedossa
+});
+
+function CheckMac() {
+    if (CONFIG.shellyMac.length > 0) {
+        print('Device info: id ', CONFIG.shellyMac, ', firmware version ', CONFIG.shellyFwVer);
+    } else {
+        print('Could not get valid device-id.');
+		Shelly.stop()
+    }
+}
+
+function getUptime() {
+	try {
+		if (parseFloat(CONFIG.shellyFwVer) >= 1.5) {
+			STATE.shellyUptime = parseInt(Shelly.getUptimeMs()) / 1000;
+		}
+    } catch (error) {
+		print('Unable to get system uptime: ' + error)
+	}
+}
+
+function LoadJson() {
+    if (CONFIG.storageType === "ScriptStorage") {
+      try {
+        let metadata = JSON.parse(Script.storage.getItem('metadata'));
+        STATE.deviceChannels = metadata.channels;
+        STATE.lastRequest = parseInt(metadata.timestamp);
+        STATE.jsonValidUntil = metadata.valid_until;
+		STATE.getcontrolsInit = true;
+        metadata = null;
+        print('Found controls data from Script storage.');
+      } catch(error) {
+        print('Unable to load data from Script storage: ' + error);
+      }
+    } else {
+        try {
+          let metadata = JSON.parse(KVS.get('metadata'));
+          STATE.deviceChannels = metadata.channels;
+          STATE.lastRequest = metadata.timestamp;
+          STATE.jsonValidUntil = metadata.valid_until;
+		  STATE.getcontrolsInit = true;
+          metadata = null;
+          print('Found controls data from Key-Value -storage.');
+        } catch(error) {
+          print('Unable to load data from Key-Value -storage: ' + error);
+        }
+    }
+}
+
+function SaveJson(key, data) {
+    if (CONFIG.storageType === "ScriptStorage") {
+      Script.storage.setItem(key, JSON.stringify(data));
+      print('Saved ' + key + ' to Script storage.');
+    } else {
+        KVS.set(key, JSON.stringify(data));
+        print('Saved ' + key + ' to KVS storage.');
+    }
+}
+
+function UpdateStatus() {
+    print('Updating time variables. Reboot if control schedule is empty.');
+    let curTime = new Date(Date.now());
+    let timestampMillis = Date.now();      
+    STATE.currentUnixTime = Math.floor(timestampMillis / 1000);
+    STATE.currentHour = curTime.getHours();
+    STATE.currentMinute = curTime.getMinutes();
+    if (STATE.getcontrolsInit === true && STATE.jsonValidUntil <= STATE.currentUnixTime) {
+        print("Control schedule empty.");
+        //Shelly.call("Shelly.Reboot");
+    }
+}
+
+function ParseHttpResponse(res, error_code, error_msg, ud) {
+    let requestInfo = null;
+    if (error_code != 0) {
+        print("Request error: ", error_code, error_msg);
+    } else {
+        if (res.code === 200) {
+			try{
+				requestInfo = 'Get controls successful. Code 200.';
+				let metadata = JSON.parse(res.body).metadata;
+				SaveJson('metadata', metadata);
+				SaveJson('controls', JSON.parse(res.body).controls);
+				CONFIG.deviceChannels = parseInt(metadata.channels);
+				CONFIG.apiEndpoint = JSON.stringify(metadata.fetch_url);
+            	STATE.lastRequest = parseInt(metadata.timestamp);
+            	STATE.jsonValidUntil = parseInt(metadata.valid_until);
+				metadata = null;	
+				print('Controls JSON parsed.');
+            	print('Device controlled channels: ', CONFIG.deviceChannels);
+            	print('Control json valid until: ', STATE.jsonValidUntil);
+            	print('Api endpoint: ', CONFIG.apiEndpoint);
+				STATE.getcontrolsInit = true;
+			} catch (error) {
+				print('Unable to save controls data: ' + error)
+			}
+        } else if (res.code === 304) {
+			requestInfo = 'Controls data not updated after last request: ' + res.code;
+		} else {
+            requestInfo = 'Get controls failed. Code: ' + res.code;
+        }
+    }
+    STATE.controlsReady = true;
+    STATE.cyclesUntilRequest = 18 + Math.floor(3 * Math.random());
+    STATE.mainCycleCounter = 1;
+    print('Server request done. ', requestInfo);
+	STATE.isCallBusy = false;
+	res = null;
+}
+
+function getControls() {
+	try {
+    	print('Get controls-JSON.');
+    	let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + CONFIG.shellyMac + "&last_request=" + JSON.stringify(STATE.lastRequest) + "&script_version=" + VERSION + "&client_model=" + CONFIG.shellyApp + "&client_fw=" + CONFIG.shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps + "&json_version=" + CONFIG.jsonVersion + "&json_channel_names=" + CONFIG.jsonChannelNames;
+    	print('URL: ', urlToCall);
+		STATE.isCallBusy = true;
+    	Shelly.call("HTTP.GET", { url: urlToCall, timeout: 10, ssl_ca:"*" }, ParseHttpResponse);
+	} catch (error) {
+		print('Unable to make Shelly call to fetch data from server: ' + error)
+		STATE.isCallBusy = false;
+	}
+}
+
+function doControls() {
+    print('Get controls data from storage.');
+    let SwitchId, ControlState, ChannelKeys, ChannelEntry, Controls;
+	try {
+		if (CONFIG.storageType === "ScriptStorage") {
+			Controls = JSON.parse(Script.storage.getItem('controls'));
+		} else {
+			Controls = JSON.parse(KVS.get('controls'));
+		}
+
+		if (!Controls) {
+            print('No controls data found.');
+            return;
+        }
+		print('Found control data.')
+	} catch(error) {
+		print('Unable to load controls data from storage: ' + error);
+	}
+
+	print('Executing controls')
+	try {
+		ChannelKeys = Object.keys(Controls);
+    	if (ChannelKeys.length > 0) {
+        	if (STATE.doControlsInit === true) {
+            	for (ChannelEntry in ChannelKeys) {
+                	SwitchId = Controls[ChannelEntry].id - 1;
+                	if (Controls[ChannelEntry].updated > STATE.channelLastControlTimeStamps[SwitchId]) {
+                    	print('Switch id ', SwitchId, ' user settings changed after last control. Controlling to current state.');
+                    	ControlState = Controls[ChannelEntry].state;
+                    	if (ControlState == 1) {
+							enqueueShellyCall("Switch.Set", { id: SwitchId, on: true }, null);
+                    	} else if (ControlState == 0) {
+                        	enqueueShellyCall("Switch.Set", { id: SwitchId, on: false }, null);
+                    	}
+                    	STATE.channelLastControlTimeStamps[SwitchId] = STATE.currentUnixTime;
+					} else {
+						ScheduleKeys = Object.keys(Controls[ChannelEntry].schedules);
+						for (ScheduleEntry in ScheduleKeys) {
+							if ((STATE.currentUnixTime >= Controls[ChannelEntry].schedules[ScheduleEntry].timestamp) && (Controls[ChannelEntry].schedules[ScheduleEntry].timestamp > STATE.channelLastControlTimeStamps[SwitchId])) {
+								ControlState = Controls[ChannelEntry].schedules[ScheduleEntry].state;
+								if (ControlState == 1) {
+									enqueueShellyCall("Switch.Set", { id: SwitchId, on: true }, null);
+								} else if (ControlState == 0) {
+									enqueueShellyCall("Switch.Set", { id: SwitchId, on: false }, null);
+								}
+								STATE.channelLastControlTimeStamps[SwitchId] = Controls[ChannelEntry].schedules[ScheduleEntry].timestamp;
+							}
+						} 
+					}    
+                	
+            	}
+			} else {
+				print('Initializing controls to current states.');		
+				for (ChannelEntry in ChannelKeys) {
+					SwitchId = Controls[ChannelEntry].id - 1;
+					ControlState = Controls[ChannelEntry].state;
+			
+					if (ControlState == 1) {
+						enqueueShellyCall("Switch.Set", { id: SwitchId, on: true }, null);
+					} else if (ControlState == 0) {
+						enqueueShellyCall("Switch.Set", { id: SwitchId, on: false }, null);
+					}
+					STATE.channelLastControlTimeStamps[SwitchId] = STATE.currentUnixTime;	
+				}
+				STATE.doControlsInit = true;
+			}
+		}
+    	print('Controls executed.');
+	} catch (error) {
+		print('Impossible to do controls: ' + error)
+	}
+}
+
+function enqueueShellyCall(method, params, callback) {
+    STATE.shellyCallQueue.push({ method: method, params: params, callback: callback });
+    processShellyCallQueue();
+}
+
+function processShellyCallQueue() {
+    if (STATE.isCallBusy || STATE.shellyCallQueue.length === 0) {
+        return;
+    }
+
+    STATE.isCallBusy = true;
+    print(JSON.stringify(STATE.shellyCallQueue));
+    let nextCall = STATE.shellyCallQueue[0]; // Hae ensimmäinen alkio
+    STATE.shellyCallQueue.splice(0, 1); 
+    print(nextCall)
+
+    Shelly.call(nextCall.method, nextCall.params, function (result, error) {
+        if (nextCall.callback) {
+            nextCall.callback(result, error);
+        }
+        
+        STATE.isCallBusy = false;
+        processShellyCallQueue(); // Suoritetaan seuraava kutsu jonosta
+    });
+}
+
+function MainCycle() {    
+    print('Cycle ', STATE.mainCycleCounter, '/', STATE.cyclesUntilRequest, ' until next request.');
+    if (STATE.getcontrolsInit === true) {
+        UpdateStatus();
+        if (STATE.controlsReady === true) {
+            doControls();
+        }    
+    } else {
+        print('Initial controls data not fetched from server, impossible to do controls.');
+    }
+    if (STATE.mainCycleCounter >= STATE.cyclesUntilRequest) {
+        STATE.controlsReady = false;
+        getControls();
+    }
+    STATE.mainCycleCounter++;
+}
+
+mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
