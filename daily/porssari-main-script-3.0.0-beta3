@@ -2,11 +2,11 @@ let VERSION = "Shelly-3.0.0-beta3";
 
 // Settings
 let CONFIG = {
-    updatePeriod: 15000, 
-    apiEndpoint: "https://dev.porssari.fi/getcontrols.php", 
-    returnTimestamps: 10, 
-    jsonVersion: 2, 
-    jsonChannelNames: false, 	
+    updatePeriod: 15000,
+    apiEndpoint: "https://dev.porssari.fi/getcontrols.php",
+    returnTimestamps: 10,
+    jsonVersion: 2,
+    jsonChannelNames: false,
     logLevel: 0, // 0=debug, 1=info, 2=warn, 3=error
 };
 
@@ -37,16 +37,16 @@ function log(level, message) {
     }
 }
 
-// Functions
+// Program init functions
 function init() {
-	log(LOG.ERROR, "Pörssäri Control Script, version: " + VERSION);
+    log(LOG.ERROR, "Pörssäri Control Script, version: " + VERSION);
     try {
-		log(LOG.INFO, "Retrieving device information...");
-		enqueueShellyCall('Shelly.GetDeviceInfo', {}, InitCallback);        
-	} catch (error) {
-	    log(LOG.ERROR, "An error occurred while retrieving device information. Stopping script.");
-		return;
-	}
+        log(LOG.INFO, "Retrieving device information...");
+        enqueueShellyCall('Shelly.GetDeviceInfo', {}, InitCallback);
+    } catch (error) {
+        log(LOG.ERROR, "An error occurred while retrieving device information. Stopping script.");
+        return;
+    }
 }
 
 function InitCallback(result) {
@@ -54,8 +54,8 @@ function InitCallback(result) {
     shellyMac = result.mac;
     shellyFwVer = result.ver;
     result = null;
-    scriptId = (parseFloat(shellyFwVer) >= 1.5) ? Script.id : Shelly.getCurrentScriptId();  
-
+    scriptId = (parseFloat(shellyFwVer) >= 1.5) ? Script.id : Shelly.getCurrentScriptId();
+    
     // Check if device mac exists
     if (shellyMac.length > 0) {
         log(LOG.DEBUG, "Device info: device " + shellyApp + ", id " + shellyMac + ", firmware version " + shellyFwVer + ", script-id " + scriptId);
@@ -63,42 +63,44 @@ function InitCallback(result) {
         log(LOG.ERROR, "Could not get valid device information. Stopping script.");
         return;
     }
-
+    
     // Initialize control loop timer:
     mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
-    if (mainTimer) {
-        log(LOG.INFO, "Program loop timer initialized")
+    if (!mainTimer) {
+        log(LOG.ERROR, "Main timer not initialized. Stopping script.");
+    } else {
+        log(LOG.INFO, "Program loop timer initialized");
     }
-
+    
     // Call startup function: Script Authentication
-    log(LOG.DEBUG, "Calling startup function in 1 second: Get auth key from server.");
-    Timer.set(1000, false, InitAuthentication);
-
+    log(LOG.DEBUG, "Calling startup function in 2 seconds: Get auth key from server.");
+    Timer.set(2000, false, InitAuthentication);
+    
     // Call startup function: Check local control data
-    log(LOG.DEBUG, "Calling startup function in 2 seconds: Load controls data from storage.");
-    Timer.set(2000, false, LoadSavedControldata);
-
+    log(LOG.DEBUG, "Calling startup function in 4 seconds: Load controls data from storage.");
+    Timer.set(4000, false, LoadSavedControldata);
+    
     // Call startup function: Get control data from server
-    log(LOG.DEBUG, "Calling startup function in 3 seconds: Request controls data from server.");
-    Timer.set(3000, false, RequestControldata);
+    log(LOG.DEBUG, "Calling startup function in 6 seconds: Request controls data from server.");
+    Timer.set(6000, false, RequestControldata);
 }
 
-// Authentication
+// Server authentication
 function InitAuthentication() {
-	try {
-		log(LOG.INFO, "Checking authentication status...");
-		enqueueShellyCall('HTTP.REQUEST', 
-		    {
+    try {
+        log(LOG.INFO, "Checking authentication status...");
+        enqueueShellyCall('HTTP.REQUEST',
+            {
                 method: 'POST',
-        	    url: CONFIG.apiEndpoint,
-        	    headers: { "Content-Type": "application/json" },
-        	    body: JSON.stringify({device_id: shellyMac}),
-    	    },
-    	    InitAuthenticationCallback
+                url: CONFIG.apiEndpoint,
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({device_id: shellyMac}),
+            },
+            InitAuthenticationCallback
         );
-	} catch (error) {
-		log(LOG.WARN, "An error occurred while registering device, sending device data to server is not possible: " + error);
-	}
+    } catch (error) {
+        log(LOG.WARN, "An error occurred while registering device, sending device data to server is not possible: " + error);
+    }
 }
 
 function InitAuthenticationCallback(result) {
@@ -106,12 +108,12 @@ function InitAuthenticationCallback(result) {
         log(LOG.WARN, "Unknown error with auth key request");
         return;
     }
-        
+    
     if (result && result.code !== 200) {
         log(LOG.WARN, "Error with auth key request: ", result.message);
         return;
     }
-
+    
     let data;
     try {
         data = JSON.parse(result.body);
@@ -121,45 +123,45 @@ function InitAuthenticationCallback(result) {
         return;
     }
     result = null;
-
+    
     if (!data || typeof data !== "object") {
         log(LOG.WARN, "Invalid auth key JSON response structure.");
         return;
     }
     
     if (data.private_key) {
-        log(LOG.DEBUG, "Found private key from data, saving to local storage.")	
+        log(LOG.DEBUG, "Found private key from data, saving to local storage.");
         SetStorageValue("porssari_auth", data.private_key);
     } else {
         log(LOG.WARN, "Failed to save auth key");
     }
-    data = null;   
+    data = null;
 }
 
-// Check local data
+// Local data functions
 function LoadSavedControldata() {
     log(LOG.INFO, "Checking for existing data in local storage...");
-	try {
-		GetStorageValue('metadata', LoadSavedControldataCallback);
-	} catch(error) {
-		log(LOG.INFO, "Saved data not found in local storage: " + error);
-	}
+    try {
+        GetStorageValue('metadata', LoadSavedControldataCallback);
+    } catch(error) {
+        log(LOG.INFO, "Saved data not found in local storage: " + error);
+    }
 }
 
 function LoadSavedControldataCallback(result) {
     if (!result) {
         log(LOG.WARN, "Saved control data not found from local storage.");
     }
-
+    
     let data;
     try {
         data = JSON.parse(result);
-
+        
         if (!data || typeof data !== "object") {
             log(LOG.WARN, "Invalid JSON structure in saved data.");
             return;
         }
-
+        
         result = null;
         deviceChannels = data.channels;
         lastRequest = data.timestamp;
@@ -171,226 +173,9 @@ function LoadSavedControldataCallback(result) {
         controlsReady = true;
     } catch (error) {
         log(LOG.INFO, "Could not parse metadata from local storage: " + error);
-    } 
-}
-
-// Server request
-function RequestControldata() {
-	try {
-    	log(LOG.INFO, "Requesting control data from server...");
-    	let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + shellyMac + "&last_request=" + (lastRequest || 0) + "&script_version=" + VERSION + "&client_model=" + shellyApp + "&client_fw=" + shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps + "&json_version=" + CONFIG.jsonVersion + "&json_channel_names=" + CONFIG.jsonChannelNames;
-    	log(LOG.DEBUG, "URL: " + urlToCall);
-    	enqueueShellyCall("HTTP.GET", { url: urlToCall, timeout: 10, ssl_ca:"*" }, RequestControldataCallback);
-        urlToCall = null;
-    } catch (error) {
-        log(LOG.ERROR, "Error while requesting control data from server: " + error);
     }
 }
 
-function RequestControldataCallback(res, error_code, error_msg) {
-    let requestInfo;
-
-    if (error_code != 0) {
-        log(LOG.ERROR, "Request error: " + error_code, error_msg);
-        return;
-    }
-
-    if (!res) {
-        log(LOG.ERROR, "Invalid response: " + error_code, error_msg);
-        return;
-    }
-
-    try {
-        if (res.code === 200) {
-            requestInfo = 'Get controls successful. Code 200.';
-            
-            let metadata = JSON.parse(res.body).metadata
-            SetStorageValue('metadata', metadata);
-            SetStorageValue('controls', JSON.parse(res.body).controls);
-            res = null;
-
-            deviceChannels = parseInt(metadata.channels);
-            CONFIG.apiEndpoint = JSON.stringify(metadata.fetch_url);
-            lastRequest = parseInt(metadata.timestamp);
-            jsonValidUntil = parseInt(metadata.valid_until);
-            metadata = null;
-
-            controlsData = true;
-
-            log(LOG.DEBUG, "Controls JSON parsed.");
-            log(LOG.DEBUG, "Controlled channels: " + deviceChannels + ", valid until: " + jsonValidUntil + ", api endpoint: " + CONFIG.apiEndpoint);
-        } else if (res.code === 204) {
-            requestInfo = "Device found from server without associated loads: " + res.code;
-            res = null;
-        } else if (res.code === 304) {
-            requestInfo = "Controls data not updated after last request: " + res.code;
-            res = null;
-        } else {
-            requestInfo = "Invalid server request. Code: " + res.code;
-            res = null;
-        }
-    } catch (error) {
-        log(LOG.ERROR, "Control data request failed: " + error)
-    }
-     
-    log(LOG.INFO, "Server request done. " + requestInfo);
-    requestInfo = null;
-    controlsReady = true;
-
-    cyclesUntilRequest = 18 + Math.floor(3 * Math.random());
-    mainCycleCounter = 1;
-    log(LOG.DEBUG, "Resetting request cycle counter. Cycles before next request: " + cyclesUntilRequest);
-}
-
-function CheckControlData() {
-    log(LOG.DEBUG, "Checking if control data is valid."); 
-    currentUnixTime = Math.floor(Date.now() / 1000);
-
-    if (controlsData && jsonValidUntil <= currentUnixTime) {      
-        log(LOG.WARN, "The control schedule is empty. Activating failsafe mode.");
-        isFailsafe = true;
-        return;        
-    }
-
-    if (!controlsData) {
-        log(LOG.WARN, "Control data not available. Activating failsafe mode.");
-        isFailsafe = true;
-        return;
-    }
-
-    log(LOG.DEBUG, "Control data is valid for " + parseInt((jsonValidUntil - currentUnixTime) / 60) + " minutes");
-    return;
-}
-
-function DoControls() {
-    log(LOG.INFO, "Execute controls...");
-	try {
-		GetStorageValue('controls', DoControlsCallback);
-	} catch(error) {
-		log(LOG.INFO, "Error while executing controls: " + error);
-	}
-}
-
-function DoControlsCallback(value) {
-    currentUnixTime = Math.floor(Date.now() / 1000);
-    log(LOG.DEBUG, "Found controls data, executing controls.");
-    let controls = JSON.parse(value);
-    value = null;
-
-    if (!controls || typeof controls !== "object") {
-        log(LOG.ERROR, "Invalid JSON structure, controls not done.");
-        return;
-    }
-
-    let channelKeys = Object.keys(controls);
-
-    if (!controlsInitialized) {
-        log(LOG.INFO, "Initializing relays to current states...")
-        try {
-            for (let channelEntry in channelKeys) {
-                let switchId = controls[channelEntry].id - 1;
-                let controlState = controls[channelEntry].state;
-                let controlTimestamp = lastRequest;
-                log(LOG.DEBUG, "JSON timestamp: " + controlTimestamp + ", channel state: " + controlState);
-
-
-                // Järjestetään aikataulut aikajärjestykseen (vanhimmasta uusimpaan)
-                let scheduleKeys = Object.keys(controls[channelEntry].schedules);
-                scheduleKeys = selectionSortSchedule(scheduleKeys, controls[channelEntry].schedules);
-
-                for (let scheduleEntry in scheduleKeys) {
-                    if (controls[channelEntry].schedules[scheduleEntry].timestamp < currentUnixTime) {
-                        controlState = controls[channelEntry].schedules[scheduleEntry].state;
-                        controlTimestamp = controls[channelEntry].schedules[scheduleEntry].timestamp;
-                        log(LOG.DEBUG, "Passed timestamp: " + controlTimestamp + ", state switched to " + controlState);
-                    }
-                }
-
-                if (controlState == 1) {
-                    enqueueShellyCall("Switch.Set", { id: switchId, on: true }, null);
-                } else if (controlState == 0) {
-                    enqueueShellyCall("Switch.Set", { id: switchId, on: false }, null);
-                }
-                log(LOG.DEBUG, "Switched relay " + (switchId + 1) + " to state " + controlState + ", timestamp: "+ controlTimestamp);
-                channelLastControlTimeStamps[switchId] = controlTimestamp;	
-            }
-            controlsInitialized = true;
-            log(LOG.INFO, "Controls initialized.");
-            return;
-        } catch (error) {
-            log(LOG.ERROR, "Error while initializing relays to current states: " + error);
-            return;
-        }
-    }
-
-    log(LOG.DEBUG, "Reading schedule.");
-	try {	
-    	if (channelKeys.length > 0) {
-            for (let channelEntry in channelKeys) {
-                let switchId = controls[channelEntry].id - 1;
-                if (controls[channelEntry].updated > channelLastControlTimeStamps[switchId]) {
-                    log(LOG.DEBUG, "Switch id " + switchId + ": User settings changed after last control. Controlling to current state.");
-                    let controlState = controls[channelEntry].state;
-                    let controlTimestamp = currentUnixTime;
-                    if (controlState == 1) {
-						enqueueShellyCall("Switch.Set", { id: switchId, on: true }, null);
-                    } else if (controlState == 0) {
-                        enqueueShellyCall("Switch.Set", { id: SwitchId, on: false }, null);
-                    }
-                    log(LOG.DEBUG, "Switched relay " + (switchId + 1) + " to state " + controlState + ", timestamp: "+ controlTimestamp);
-                    channelLastControlTimeStamps[switchId] = controlTimestamp;
-				} else {
-					let scheduleKeys = Object.keys(controls[channelEntry].schedules);
-					for (let scheduleEntry in scheduleKeys) {
-						if ((currentUnixTime >= controls[channelEntry].schedules[scheduleEntry].timestamp) && (controls[channelEntry].schedules[scheduleEntry].timestamp > channelLastControlTimeStamps[switchId])) {
-							controlState = controls[channelEntry].schedules[scheduleEntry].state;
-                            let controlTimestamp = controls[channelEntry].schedules[scheduleEntry].timestamp;
-							if (controlState == 1) {
-								enqueueShellyCall("Switch.Set", { id: switchId, on: true }, null);
-							} else if (controlState == 0) {
-								enqueueShellyCall("Switch.Set", { id: switchId, on: false }, null);
-							}
-                            log(LOG.DEBUG, "Switched relay " + (switchId + 1) + " to state " + controlState + ", timestamp: "+ controlTimestamp);
-							channelLastControlTimeStamps[switchId] = controlTimestamp;
-						}	 
-					}    	
-            	}
-            }
-			log(LOG.INFO, "Controls executed.");
-		} else {
-			log(LOG.WARN, "Could not find any controlled channels from controls data.");
-		}
-	} catch (error) {
-		log(LOG.ERROR, "Impossible to do controls: " + error);
-	}
-}
-
-
-// Shelly call queue
-function enqueueShellyCall(method, params, callback) {
-    shellyCallQueue.push({ method: method, params: params, callback: callback });
-    processShellyCallQueue();
-}
-
-function processShellyCallQueue() {
-    if (isCallBusy || shellyCallQueue.length === 0) {
-        return;
-    }
-
-    isCallBusy = true;
-    let nextCall = shellyCallQueue[0];
-    shellyCallQueue.splice(0, 1); 
-    Shelly.call(nextCall.method, nextCall.params, function (res, error_code, error_message) {
-        if (nextCall.callback) {
-            nextCall.callback(res, error_code, error_message);
-        }
-        nextCall = null;
-        isCallBusy = false;
-        processShellyCallQueue();
-    });
-}
-
-// Storage functions
 function SetStorageValue(baseKey, value) {
     let storageType, chunkSize;
 
@@ -512,6 +297,223 @@ function handleKvsPartRetrieval(res, error_code, error_message, parts, fullValue
     }
 }
 
+// Server request
+function RequestControldata() {
+    try {
+        log(LOG.INFO, "Requesting control data from server...");
+        let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + shellyMac + "&last_request=" + (lastRequest || 0) + "&script_version=" + VERSION + "&client_model=" + shellyApp + "&client_fw=" + shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps + "&json_version=" + CONFIG.jsonVersion + "&json_channel_names=" + CONFIG.jsonChannelNames;
+        log(LOG.DEBUG, "URL: " + urlToCall);
+        enqueueShellyCall("HTTP.GET", { url: urlToCall, timeout: 10, ssl_ca:"*" }, RequestControldataCallback);
+        urlToCall = null;
+    } catch (error) {
+        log(LOG.ERROR, "Error while requesting control data from server: " + error);
+    }
+}
+
+function RequestControldataCallback(res, error_code, error_msg) {
+    let requestInfo;
+    
+    if (error_code != 0) {
+        log(LOG.ERROR, "Request error: " + error_code, error_msg);
+        return;
+    }
+    
+    if (!res) {
+        log(LOG.ERROR, "Invalid response: " + error_code, error_msg);
+        return;
+    }
+
+    try {
+        if (res.code === 200) {
+            requestInfo = 'Get controls successful. Code 200.';
+            
+            let metadata = JSON.parse(res.body).metadata
+            SetStorageValue('metadata', metadata);
+            SetStorageValue('controls', JSON.parse(res.body).controls);
+            res = null;
+
+            deviceChannels = parseInt(metadata.channels);
+            CONFIG.apiEndpoint = JSON.stringify(metadata.fetch_url);
+            lastRequest = parseInt(metadata.timestamp);
+            jsonValidUntil = parseInt(metadata.valid_until);
+            metadata = null;
+
+            controlsData = true;
+
+            log(LOG.DEBUG, "Controls JSON parsed.");
+            log(LOG.DEBUG, "Controlled channels: " + deviceChannels + ", valid until: " + jsonValidUntil + ", api endpoint: " + CONFIG.apiEndpoint);
+        } else if (res.code === 204) {
+            requestInfo = "Device found from server without associated loads: " + res.code;
+            res = null;
+        } else if (res.code === 304) {
+            requestInfo = "Controls data not updated after last request: " + res.code;
+            res = null;
+        } else {
+            requestInfo = "Invalid server request. Code: " + res.code;
+            res = null;
+        }
+    } catch (error) {
+        log(LOG.ERROR, "Control data request failed: " + error)
+    }
+     
+    log(LOG.INFO, "Server request done. " + requestInfo);
+    requestInfo = null;
+    controlsReady = true;
+
+    cyclesUntilRequest = 18 + Math.floor(3 * Math.random());
+    mainCycleCounter = 1;
+    log(LOG.DEBUG, "Resetting request cycle counter. Cycles before next request: " + cyclesUntilRequest);
+}
+
+// Control data functions
+function CheckControlData() {
+    log(LOG.DEBUG, "Checking if control data is valid."); 
+    currentUnixTime = Math.floor(Date.now() / 1000);
+
+    if (controlsData && jsonValidUntil <= currentUnixTime) {      
+        log(LOG.WARN, "The control schedule is empty. Activating failsafe mode.");
+        isFailsafe = true;
+        return;        
+    }
+
+    if (!controlsData) {
+        log(LOG.WARN, "Control data not available. Activating failsafe mode.");
+        isFailsafe = true;
+        return;
+    }
+
+    log(LOG.DEBUG, "Control data is valid for " + parseInt((jsonValidUntil - currentUnixTime) / 60) + " minutes");
+}
+
+function DoControls() {
+    log(LOG.INFO, "Execute controls...");
+	try {
+		GetStorageValue('controls', DoControlsCallback);
+	} catch(error) {
+		log(LOG.INFO, "Error while executing controls: " + error);
+	}
+}
+
+function DoControlsCallback(value) {
+    currentUnixTime = Math.floor(Date.now() / 1000);
+    let controls = JSON.parse(value);
+    value = null;
+
+    if (!controls || typeof controls !== "object") {
+        log(LOG.ERROR, "Invalid JSON structure, controls not done.");
+        return;
+    }
+
+    log(LOG.DEBUG, "Found controls data, executing controls.");
+    let channelKeys = Object.keys(controls);
+
+    // Initialize Shelly to current state
+    if (!controlsInitialized) {
+        log(LOG.INFO, "Initializing relays to current states...")
+        try {
+            for (let channelEntry in channelKeys) {
+                let switchId = controls[channelEntry].id - 1;
+                let controlState = controls[channelEntry].state;
+                let controlTimestamp = lastRequest;
+                log(LOG.DEBUG, "JSON timestamp: " + controlTimestamp + ", channel state: " + controlState);
+
+                // Järjestetään aikataulut aikajärjestykseen (vanhimmasta uusimpaan)
+                let scheduleKeys = Object.keys(controls[channelEntry].schedules);
+                scheduleKeys = selectionSortSchedule(scheduleKeys, controls[channelEntry].schedules);
+
+                for (let scheduleEntry in scheduleKeys) {
+                    if (controls[channelEntry].schedules[scheduleEntry].timestamp < currentUnixTime) {
+                        controlState = controls[channelEntry].schedules[scheduleEntry].state;
+                        controlTimestamp = controls[channelEntry].schedules[scheduleEntry].timestamp;
+                        log(LOG.DEBUG, "Passed timestamp: " + controlTimestamp + ", state switched to " + controlState);
+                    }
+                }
+
+                if (controlState == 1) {
+                    enqueueShellyCall("Switch.Set", { id: switchId, on: true }, null);
+                } else if (controlState == 0) {
+                    enqueueShellyCall("Switch.Set", { id: switchId, on: false }, null);
+                }
+                log(LOG.DEBUG, "Switched relay " + (switchId + 1) + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                channelLastControlTimeStamps[switchId] = controlTimestamp;	
+            }
+            controlsInitialized = true;
+            log(LOG.INFO, "Controls initialized.");
+            return;
+        } catch (error) {
+            log(LOG.ERROR, "Error while initializing relays to current states: " + error);
+            return;
+        }
+    }
+
+    // If initialized, read control state from schedule
+    log(LOG.DEBUG, "Reading schedule.");
+	try {	
+    	if (channelKeys.length > 0) {
+            for (let channelEntry in channelKeys) {
+                let switchId = controls[channelEntry].id - 1;
+                if (controls[channelEntry].updated > channelLastControlTimeStamps[switchId]) {
+                    log(LOG.DEBUG, "Switch id " + switchId + ": User settings changed after last control. Controlling to current state.");
+                    let controlState = controls[channelEntry].state;
+                    let controlTimestamp = currentUnixTime;
+                    if (controlState == 1) {
+						enqueueShellyCall("Switch.Set", { id: switchId, on: true }, null);
+                    } else if (controlState == 0) {
+                        enqueueShellyCall("Switch.Set", { id: SwitchId, on: false }, null);
+                    }
+                    log(LOG.DEBUG, "Switched relay " + (switchId + 1) + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                    channelLastControlTimeStamps[switchId] = controlTimestamp;
+				} else {
+					let scheduleKeys = Object.keys(controls[channelEntry].schedules);
+					for (let scheduleEntry in scheduleKeys) {
+						if ((currentUnixTime >= controls[channelEntry].schedules[scheduleEntry].timestamp) && (controls[channelEntry].schedules[scheduleEntry].timestamp > channelLastControlTimeStamps[switchId])) {
+							controlState = controls[channelEntry].schedules[scheduleEntry].state;
+                            let controlTimestamp = controls[channelEntry].schedules[scheduleEntry].timestamp;
+							if (controlState == 1) {
+								enqueueShellyCall("Switch.Set", { id: switchId, on: true }, null);
+							} else if (controlState == 0) {
+								enqueueShellyCall("Switch.Set", { id: switchId, on: false }, null);
+							}
+                            log(LOG.DEBUG, "Switched relay " + (switchId + 1) + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+							channelLastControlTimeStamps[switchId] = controlTimestamp;
+						}	 
+					}    	
+            	}
+            }
+			log(LOG.INFO, "Controls executed.");
+		} else {
+			log(LOG.WARN, "Could not find any controlled channels from controls data.");
+		}
+	} catch (error) {
+		log(LOG.ERROR, "Impossible to do controls: " + error);
+	}
+}
+
+// Shelly call queue
+function enqueueShellyCall(method, params, callback) {
+    shellyCallQueue.push({ method: method, params: params, callback: callback });
+    processShellyCallQueue();
+}
+
+function processShellyCallQueue() {
+    if (isCallBusy || shellyCallQueue.length === 0) {
+        return;
+    }
+
+    isCallBusy = true;
+    let nextCall = shellyCallQueue[0];
+    shellyCallQueue.splice(0, 1); 
+    Shelly.call(nextCall.method, nextCall.params, function (res, error_code, error_message) {
+        if (nextCall.callback) {
+            nextCall.callback(res, error_code, error_message);
+        }
+        nextCall = null;
+        isCallBusy = false;
+        processShellyCallQueue();
+    });
+}
+
+// Sort schedule for initialization
 function selectionSortSchedule(keys, schedules) {
     let n = keys.length;
     for (let i = 0; i < n - 1; i++) {
@@ -521,7 +523,7 @@ function selectionSortSchedule(keys, schedules) {
                 minIndex = j;
             }
         }
-        // Vaihdetaan pienin löydetty alkio nykyiseen paikkaan
+        
         let temp = keys[i];
         keys[i] = keys[minIndex];
         keys[minIndex] = temp;
@@ -529,29 +531,31 @@ function selectionSortSchedule(keys, schedules) {
     return keys;
 }
 
+// Failsafe logic (NOT IMPLEMENTED YET!)
 function DoFailsafeControls() {
     return;
 }
 
-function MainCycle() {	
-	log(LOG.INFO, "Cycle " + mainCycleCounter + "/" + cyclesUntilRequest + " until next request.");
-
+// Script cycle
+function MainCycle() {
+    log(LOG.INFO, "Cycle " + mainCycleCounter + "/" + cyclesUntilRequest + " until next request.");
+    
     CheckControlData();
-
+    
     if ((!isFailsafe) && controlsData && controlsReady) {
         DoControls();
-    } 
-     
+    }
+    
     if (isFailsafe) {
         DoFailsafeControls();
     }
     
     if (mainCycleCounter >= cyclesUntilRequest) {
-		controlsReady = false;
+        controlsReady = false;
         RequestControldata();
     }
-
-	mainCycleCounter++;
+    
+    mainCycleCounter++;
 }
 
 // Start program
