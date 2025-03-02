@@ -1,4 +1,4 @@
-let VERSION = "Shelly-3.0.0-beta3";
+let VERSION = "Shelly-3.0.0-beta4";
 
 // Settings
 let CONFIG = {
@@ -14,7 +14,7 @@ let CONFIG = {
 let shellyApp, shellyMac, shellyFwVer, scriptId, deviceChannels;
 let currentUnixTime, jsonValidUntil, shellyUptime;
 let lastRequest, lastRequestHttpCode;
-let controlsData = controlsInitialized = isCallBusy = isFailsafe = false;
+let controlsData = controlsInitialized = isCallBusy = isCallDelay = isFailsafe = false;
 let mainCycleCounter = 20;
 let cyclesUntilRequest = 20;
 let mainTimer;
@@ -44,7 +44,7 @@ function init() {
         log(LOG.INFO, "Retrieving device information...");
         enqueueShellyCall('Shelly.GetDeviceInfo', {}, InitCallback);
     } catch (error) {
-        log(LOG.ERROR, "An error occurred while retrieving device information. Stopping script.");
+        log(LOG.ERROR, "An error occurred while retrieving device information. Stopping script. " + error);
         return;
     }
 }
@@ -307,6 +307,10 @@ function RequestControldata() {
         urlToCall = null;
     } catch (error) {
         log(LOG.ERROR, "Error while requesting control data from server: " + error);
+        controlsReady = true;
+        cyclesUntilRequest = 18 + Math.floor(3 * Math.random());
+        mainCycleCounter = 1;
+        log(LOG.DEBUG, "Resetting request cycle counter. Cycles before next request: " + cyclesUntilRequest);
     }
 }
 
@@ -333,7 +337,7 @@ function RequestControldataCallback(res, error_code, error_msg) {
             res = null;
 
             deviceChannels = parseInt(metadata.channels);
-            CONFIG.apiEndpoint = JSON.stringify(metadata.fetch_url);
+            CONFIG.apiEndpoint = metadata.fetch_url;
             lastRequest = parseInt(metadata.timestamp);
             jsonValidUntil = parseInt(metadata.valid_until);
             metadata = null;
@@ -398,118 +402,140 @@ function DoControlsCallback(value) {
     currentUnixTime = Math.floor(Date.now() / 1000);
     let controls = JSON.parse(value);
     value = null;
-
+    
     if (!controls || typeof controls !== "object") {
         log(LOG.ERROR, "Invalid JSON structure, controls not done.");
         return;
     }
-
+    
     log(LOG.DEBUG, "Found controls data, executing controls.");
     let channelKeys = Object.keys(controls);
-
+    if (!channelKeys || channelKeys.length == 0) {
+        log(LOG.WARN, "Could not find any controlled channels from controls data.");
+        return;
+    }
+    
     // Initialize Shelly to current state
     if (!controlsInitialized) {
-        log(LOG.INFO, "Initializing relays to current states...")
+        log(LOG.INFO, "Initializing relays to current states...");
         try {
             for (let channelEntry in channelKeys) {
-                let switchId = controls[channelEntry].id - 1;
-                let controlState = controls[channelEntry].state;
+                let switchId = parseInt(controls[channelEntry].id - 1);
+                let controlState = parseInt(controls[channelEntry].state);
                 let controlTimestamp = lastRequest;
+                log(LOG.DEBUG, "Initializing relay " + controls[channelEntry].id);
                 log(LOG.DEBUG, "JSON timestamp: " + controlTimestamp + ", channel state: " + controlState);
-
+                
                 // Järjestetään aikataulut aikajärjestykseen (vanhimmasta uusimpaan)
                 let scheduleKeys = Object.keys(controls[channelEntry].schedules);
                 scheduleKeys = selectionSortSchedule(scheduleKeys, controls[channelEntry].schedules);
-
+                
                 for (let scheduleEntry in scheduleKeys) {
                     if (controls[channelEntry].schedules[scheduleEntry].timestamp < currentUnixTime) {
-                        controlState = controls[channelEntry].schedules[scheduleEntry].state;
-                        controlTimestamp = controls[channelEntry].schedules[scheduleEntry].timestamp;
+                        controlState = parseInt(controls[channelEntry].schedules[scheduleEntry].state);
+                        controlTimestamp = parseInt(controls[channelEntry].schedules[scheduleEntry].timestamp);
                         log(LOG.DEBUG, "Passed timestamp: " + controlTimestamp + ", state switched to " + controlState);
                     }
                 }
-
-                if (controlState == 1) {
-                    enqueueShellyCall("Switch.Set", { id: switchId, on: true }, null);
-                } else if (controlState == 0) {
-                    enqueueShellyCall("Switch.Set", { id: switchId, on: false }, null);
-                }
-                log(LOG.DEBUG, "Switched relay " + (switchId + 1) + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                
+                enqueueShellyCall("Switch.Set", {
+                    id: switchId, 
+                    on: controlState === 0 ? false : true 
+                }, null);
+                log(LOG.DEBUG, "Switched relay " +  controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;	
             }
             controlsInitialized = true;
-            log(LOG.INFO, "Controls initialized.");
+            log(LOG.INFO, "Relays initialized.");
             return;
         } catch (error) {
             log(LOG.ERROR, "Error while initializing relays to current states: " + error);
+            controlsInitialized = false;
             return;
         }
     }
-
+    
     // If initialized, read control state from schedule
-    log(LOG.DEBUG, "Reading schedule.");
-	try {	
-    	if (channelKeys.length > 0) {
-            for (let channelEntry in channelKeys) {
-                let switchId = controls[channelEntry].id - 1;
-                if (controls[channelEntry].updated > channelLastControlTimeStamps[switchId]) {
-                    log(LOG.DEBUG, "Switch id " + switchId + ": User settings changed after last control. Controlling to current state.");
-                    let controlState = controls[channelEntry].state;
-                    let controlTimestamp = currentUnixTime;
-                    if (controlState == 1) {
-						enqueueShellyCall("Switch.Set", { id: switchId, on: true }, null);
-                    } else if (controlState == 0) {
-                        enqueueShellyCall("Switch.Set", { id: SwitchId, on: false }, null);
+    log(LOG.DEBUG, "Relays initialized, reading schedule or updated state.");
+	try {
+        for (let channelEntry in channelKeys) {
+            let switchId =  parseInt(controls[channelEntry].id) - 1;
+            log(LOG.DEBUG, "Relay " + controls[channelEntry].id + ": User settings updated: " + controls[channelEntry].updated + ", last controlled timestamp:" + channelLastControlTimeStamps[switchId]);
+            if (parseInt(controls[channelEntry].updated) > parseInt(channelLastControlTimeStamps[switchId])) {
+                log(LOG.DEBUG, "Relay " +  parseInt(controls[channelEntry].id) + ": User settings changed after last controlled timestamp. Controlling to current state.");
+                let controlState = parseInt(controls[channelEntry].state);
+                let controlTimestamp = currentUnixTime;
+                enqueueShellyCall("Switch.Set", {
+                    id: switchId, 
+                    on: controlState === 0 ? false : true 
+                }, null);
+                log(LOG.DEBUG, "Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                channelLastControlTimeStamps[switchId] = controlTimestamp;
+            } else {
+                log(LOG.DEBUG,  "Relay " + controls[channelEntry].id + ": User settings not updated, reading schedule for passed timestamps.");
+                let scheduleKeys = Object.keys(controls[channelEntry].schedules);
+                for (let scheduleEntry in scheduleKeys) {
+                    if ((currentUnixTime >= controls[channelEntry].schedules[scheduleEntry].timestamp) && (controls[channelEntry].schedules[scheduleEntry].timestamp > channelLastControlTimeStamps[switchId])) {
+                        let controlState = controls[channelEntry].schedules[scheduleEntry].state;
+                        let controlTimestamp = controls[channelEntry].schedules[scheduleEntry].timestamp;
+                        enqueueShellyCall("Switch.Set", {
+                            id: switchId,
+                            on: controlState === 0 ? false : true 
+                        }, null);
+                        log(LOG.DEBUG, "Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                        channelLastControlTimeStamps[switchId] = controlTimestamp;
                     }
-                    log(LOG.DEBUG, "Switched relay " + (switchId + 1) + " to state " + controlState + ", timestamp: "+ controlTimestamp);
-                    channelLastControlTimeStamps[switchId] = controlTimestamp;
-				} else {
-					let scheduleKeys = Object.keys(controls[channelEntry].schedules);
-					for (let scheduleEntry in scheduleKeys) {
-						if ((currentUnixTime >= controls[channelEntry].schedules[scheduleEntry].timestamp) && (controls[channelEntry].schedules[scheduleEntry].timestamp > channelLastControlTimeStamps[switchId])) {
-							controlState = controls[channelEntry].schedules[scheduleEntry].state;
-                            let controlTimestamp = controls[channelEntry].schedules[scheduleEntry].timestamp;
-							if (controlState == 1) {
-								enqueueShellyCall("Switch.Set", { id: switchId, on: true }, null);
-							} else if (controlState == 0) {
-								enqueueShellyCall("Switch.Set", { id: switchId, on: false }, null);
-							}
-                            log(LOG.DEBUG, "Switched relay " + (switchId + 1) + " to state " + controlState + ", timestamp: "+ controlTimestamp);
-							channelLastControlTimeStamps[switchId] = controlTimestamp;
-						}	 
-					}    	
-            	}
+                }
+                log(LOG.DEBUG, "Schedule read.");
             }
-			log(LOG.INFO, "Controls executed.");
-		} else {
-			log(LOG.WARN, "Could not find any controlled channels from controls data.");
-		}
-	} catch (error) {
-		log(LOG.ERROR, "Impossible to do controls: " + error);
-	}
+        }
+        log(LOG.INFO, "Controls executed.");
+    } catch (error) {
+        log(LOG.ERROR, "Controls not executed due to unknown error: " + error);
+    }
 }
 
 // Shelly call queue
 function enqueueShellyCall(method, params, callback) {
     shellyCallQueue.push({ method: method, params: params, callback: callback });
-    processShellyCallQueue();
+    
+    if (!isCallBusy && !isCallDelay) {
+        processShellyCallQueue();
+    }
 }
 
 function processShellyCallQueue() {
     if (isCallBusy || shellyCallQueue.length === 0) {
+        isCallDelay = false;
         return;
     }
 
     isCallBusy = true;
-    let nextCall = shellyCallQueue[0];
+    let callToExecute = shellyCallQueue[0];
     shellyCallQueue.splice(0, 1); 
-    Shelly.call(nextCall.method, nextCall.params, function (res, error_code, error_message) {
-        if (nextCall.callback) {
-            nextCall.callback(res, error_code, error_message);
+    Shelly.call(callToExecute.method, callToExecute.params, function (res, error_code, error_message) {
+        if (callToExecute.callback) {
+            callToExecute.callback(res, error_code, error_message);
         }
-        nextCall = null;
         isCallBusy = false;
-        processShellyCallQueue();
+
+        if (shellyCallQueue.length === 0) {
+            log(LOG.DEBUG, "Call queue is empty.");
+            return;
+        }
+
+        if (shellyCallQueue[0].method === "Switch.Set" && callToExecute.method === "Switch.Set") {
+            log(LOG.DEBUG, "Consecutive calls are Switch.Set, setting a delay");
+            isCallDelay = true;
+            Timer.set(5000, false, function () {
+                isCallDelay = false;
+                processShellyCallQueue(); // Recurse after delay
+            });
+        } else {
+            log(LOG.DEBUG, "No consecutive Switch.Set calls, delay is not needed.");
+            isCallDelay = false;
+            processShellyCallQueue(); // Continue processing without delay
+        }        
     });
 }
 
@@ -531,7 +557,7 @@ function selectionSortSchedule(keys, schedules) {
     return keys;
 }
 
-// Failsafe logic (NOT IMPLEMENTED YET!)
+// Failsafe logic
 function DoFailsafeControls() {
     return;
 }
