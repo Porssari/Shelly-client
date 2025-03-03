@@ -1,4 +1,4 @@
-let VERSION = "Shelly-3.0.0-beta4";
+let VERSION = "Shelly-3.0.0-beta5";
 
 // Settings
 let CONFIG = {
@@ -91,10 +91,10 @@ function InitAuthentication() {
         log(LOG.INFO, "Checking authentication status...");
         enqueueShellyCall('HTTP.REQUEST',
             {
-                method: 'POST',
-                url: CONFIG.apiEndpoint,
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({device_id: shellyMac}),
+                "method": "POST",
+                "url": CONFIG.apiEndpoint,
+                "headers": { "Content-Type": "application/json" },
+                "body": JSON.stringify({"device_id": shellyMac}),
             },
             InitAuthenticationCallback
         );
@@ -200,20 +200,22 @@ function SetStorageValue(baseKey, value) {
         let key = baseKey + "_" + i; 
 
         if (storageType === "KVS") {
-            enqueueShellyCall("KVS.Set", { key: key, value: chunk }, function(res, error_code, error_message) {
-                SetKvsValueCallback(res, error_code, error_message, key, chunk, null, null);
+            enqueueShellyCall("KVS.Set", { "key": key, "value": chunk }, function(res, error_code, error_message) {
+                SetKvsValueCallback(res, error_code, error_message, key, null, null);
             });
         } else {
             Script.storage.setItem(key, chunk);
-            log(LOG.DEBUG, "Saved chunk " + key + " to " + storageType + ": " + chunk);
+            log(LOG.DEBUG, "Saved chunk " + key + " to " + storageType);
         }
+        chunk = null;
+        key = null;
     }
     value = null;
 
     let countValue = JSON.stringify({ chunks: parts });
     if (storageType === "KVS") {
-        enqueueShellyCall("KVS.Set", { key: baseKey, value: countValue }, function(res, error_code, error_message) {
-            SetKvsValueCallback(res, error_code, error_message, null, null, baseKey, parts);
+        enqueueShellyCall("KVS.Set", { "key": baseKey, "value": countValue }, function(res, error_code, error_message) {
+            SetKvsValueCallback(res, error_code, error_message, null, baseKey, parts);
         });
     } else {
         Script.storage.setItem(baseKey, countValue);
@@ -221,10 +223,10 @@ function SetStorageValue(baseKey, value) {
     }
 }
 
-function SetKvsValueCallback(res, error_code, error_message, key, chunk, baseKey, parts) {
+function SetKvsValueCallback(res, error_code, error_message, key, baseKey, parts) {
     if (error_code === 0) {
-        if (key && chunk) {
-            log(LOG.DEBUG, "Saved chunk " + key + " to KVS: " + chunk);
+        if (key) {
+            log(LOG.DEBUG, "Saved chunk " + key + " to KVS.");
         } else if (baseKey && parts) {
             log(LOG.DEBUG, "Saved " + baseKey + " to KVS, chunks count: " + parts);
         }
@@ -237,7 +239,7 @@ function GetStorageValue(baseKey, callback) {
     let storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "KVS";
 
     if (storageType === "KVS") {
-        enqueueShellyCall("KVS.Get", { key: baseKey }, function(res, error_code, error_message) {
+        enqueueShellyCall("KVS.Get", { "key": baseKey }, function(res, error_code, error_message) {
             handleKvsCountRetrieval(res, error_code, error_message, baseKey, callback);
         });
     } else {
@@ -262,6 +264,8 @@ function GetStorageValue(baseKey, callback) {
             if (chunk !== null) {
                 fullValue += chunk;
             }
+            key = null;
+            chunk = null;
         }
 
         callback(fullValue);
@@ -276,7 +280,7 @@ function handleKvsCountRetrieval(res, error_code, error_message, baseKey, callba
 
         for (let i = 0; i < parts; i++) {
             let key = baseKey + "_" + i;
-            enqueueShellyCall("KVS.Get", { key: key }, function(res, errCode, errMsg) {
+            enqueueShellyCall("KVS.Get", { "key": key }, function(res, errCode, errMsg) {
                 handleKvsPartRetrieval(res, errCode, errMsg, parts, fullValue, retrieved, callback);
             });
         }
@@ -303,7 +307,7 @@ function RequestControldata() {
         log(LOG.INFO, "Requesting control data from server...");
         let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + shellyMac + "&last_request=" + (lastRequest || 0) + "&script_version=" + VERSION + "&client_model=" + shellyApp + "&client_fw=" + shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps + "&json_version=" + CONFIG.jsonVersion + "&json_channel_names=" + CONFIG.jsonChannelNames;
         log(LOG.DEBUG, "URL: " + urlToCall);
-        enqueueShellyCall("HTTP.GET", { url: urlToCall, timeout: 10, ssl_ca:"*" }, RequestControldataCallback);
+        enqueueShellyCall("HTTP.GET", { "url": urlToCall, "timeout": 10, "ssl_ca": "*" }, RequestControldataCallback);
         urlToCall = null;
     } catch (error) {
         log(LOG.ERROR, "Error while requesting control data from server: " + error);
@@ -439,8 +443,8 @@ function DoControlsCallback(value) {
                 }
                 
                 enqueueShellyCall("Switch.Set", {
-                    id: switchId, 
-                    on: controlState === 0 ? false : true 
+                    "id": switchId, 
+                    "on": controlState === 0 ? false : true 
                 }, null);
                 log(LOG.DEBUG, "Switched relay " +  controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;	
@@ -459,15 +463,15 @@ function DoControlsCallback(value) {
     log(LOG.DEBUG, "Relays initialized, reading schedule or updated state.");
 	try {
         for (let channelEntry in channelKeys) {
-            let switchId =  parseInt(controls[channelEntry].id) - 1;
+            let switchId =  parseInt(controls[channelEntry].id - 1);
             log(LOG.DEBUG, "Relay " + controls[channelEntry].id + ": User settings updated: " + controls[channelEntry].updated + ", last controlled timestamp:" + channelLastControlTimeStamps[switchId]);
             if (parseInt(controls[channelEntry].updated) > parseInt(channelLastControlTimeStamps[switchId])) {
                 log(LOG.DEBUG, "Relay " +  parseInt(controls[channelEntry].id) + ": User settings changed after last controlled timestamp. Controlling to current state.");
                 let controlState = parseInt(controls[channelEntry].state);
                 let controlTimestamp = currentUnixTime;
                 enqueueShellyCall("Switch.Set", {
-                    id: switchId, 
-                    on: controlState === 0 ? false : true 
+                    "id": switchId, 
+                    "on": controlState === 0 ? false : true 
                 }, null);
                 log(LOG.DEBUG, "Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;
@@ -479,8 +483,8 @@ function DoControlsCallback(value) {
                         let controlState = controls[channelEntry].schedules[scheduleEntry].state;
                         let controlTimestamp = controls[channelEntry].schedules[scheduleEntry].timestamp;
                         enqueueShellyCall("Switch.Set", {
-                            id: switchId,
-                            on: controlState === 0 ? false : true 
+                            "id": switchId,
+                            "on": controlState === 0 ? false : true 
                         }, null);
                         log(LOG.DEBUG, "Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
                         channelLastControlTimeStamps[switchId] = controlTimestamp;
