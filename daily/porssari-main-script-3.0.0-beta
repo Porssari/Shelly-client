@@ -177,6 +177,32 @@ function LoadSavedControldataCallback(result) {
 }
 
 function SetStorageValue(baseKey, value) {
+    try {
+        GetStorageValue(baseKey, function (result) {
+            let previousParts = 0;
+            if (result) {
+                try {
+                    let parsedData = JSON.parse(result);
+                    result = null;
+                    if (parsedData.chunks !== undefined) {
+                        previousParts = parsedData.chunks;
+                        parsedData = null;
+                    }
+                } catch (e) {
+                    log(LOG.ERROR, "Failed to parse stored chunk data for key " + baseKey);
+                }
+            } else {
+                log(LOG.DEBUG, "No previous chunks found for key " + baseKey);
+            }
+            SetStorageValueCallback(baseKey, value, previousParts);
+        });
+    } catch (error) {
+        log(LOG.ERROR, "Error retrieving previous chunks for key " + baseKey);
+        SetStorageValueCallback(baseKey, value, 0);
+    }
+}
+
+function SetStorageValueCallback(baseKey, value, previousParts) {
     let storageType, chunkSize;
 
     if (parseFloat(shellyFwVer) >= 1.5) {
@@ -184,7 +210,7 @@ function SetStorageValue(baseKey, value) {
         chunkSize = 1000;
     } else {
         storageType = "KVS";
-        chunkSize = 250;
+        chunkSize = 200;
     }
     log(LOG.DEBUG, "Saving data to " + storageType + " with chunk size: " + chunkSize);
     
@@ -194,9 +220,12 @@ function SetStorageValue(baseKey, value) {
     }
 
     value = JSON.stringify(value);
-    let parts = Math.ceil(value.length / chunkSize); 
+    let parts = Math.ceil(value.length / chunkSize);
+
+    // Tallenna uudet chunkit
     for (let i = 0; i < parts; i++) {
         let chunk = value.substring(i * chunkSize, (i + 1) * chunkSize);
+        log(LOG.DEBUG, "Chunk length: " + chunk.length);
         let key = baseKey + "_" + i; 
 
         if (storageType === "KVS") {
@@ -207,11 +236,25 @@ function SetStorageValue(baseKey, value) {
             Script.storage.setItem(key, chunk);
             log(LOG.DEBUG, "Saved chunk " + key + " to " + storageType);
         }
-        chunk = null;
-        key = null;
     }
-    value = null;
 
+    // Poista ylimääräiset chunkit, jos uusia on vähemmän kuin vanhoja
+    if (previousParts > parts) {
+        log(LOG.DEBUG, "Removing " + (previousParts - parts) + " old chunks.");
+        for (let i = parts; i < previousParts; i++) {
+            let key = baseKey + "_" + i;
+            if (storageType === "KVS") {
+                enqueueShellyCall("KVS.Delete", { "key": key }, function(res, error_code, error_message) {
+                    log(LOG.DEBUG, "Deleted old chunk: " + key);
+                });
+            } else {
+                Script.storage.removeItem(key);
+                log(LOG.DEBUG, "Deleted old chunk: " + key + " from " + storageType);
+            }
+        }
+    }
+
+    // Päivitä chunkien määrän tallennus
     let countValue = JSON.stringify({ chunks: parts });
     if (storageType === "KVS") {
         enqueueShellyCall("KVS.Set", { "key": baseKey, "value": countValue }, function(res, error_code, error_message) {
@@ -222,6 +265,7 @@ function SetStorageValue(baseKey, value) {
         log(LOG.DEBUG, "Saved key " + baseKey + " in " + parts + " parts.");
     }
 }
+
 
 function SetKvsValueCallback(res, error_code, error_message, key, baseKey, parts) {
     if (error_code === 0) {
@@ -274,7 +318,16 @@ function GetStorageValue(baseKey, callback) {
 
 function handleKvsCountRetrieval(res, error_code, error_message, baseKey, callback) {
     if (error_code === 0) {
-        let parts = parseInt(res.value, 10);
+        try {
+            let parts = parseInt(JSON.parse(res.value).chunks, 10);
+            if (isNaN(parts)) {
+                log(LOG.ERROR, "Chunks count is not valid number.");
+                callback(null);
+                return;
+            }
+        } catch (error) {
+            log(LOG.ERROR, "Invalid value.")
+        }
         let fullValue = { value: "" };
         let retrieved = { value: 0 };
 
@@ -442,10 +495,9 @@ function DoControlsCallback(value) {
                     }
                 }
                 
-                enqueueShellyCall("Switch.Set", {
-                    "id": switchId, 
-                    "on": controlState === 0 ? false : true 
-                }, null);
+                let params = {"id": switchId, "on": controlState === 0 ? false : true};
+                enqueueShellyCall("Switch.Set", params, null);
+                params = null;
                 log(LOG.DEBUG, "Switched relay " +  controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;	
             }
@@ -469,10 +521,9 @@ function DoControlsCallback(value) {
                 log(LOG.DEBUG, "Relay " +  parseInt(controls[channelEntry].id) + ": User settings changed after last controlled timestamp. Controlling to current state.");
                 let controlState = parseInt(controls[channelEntry].state);
                 let controlTimestamp = currentUnixTime;
-                enqueueShellyCall("Switch.Set", {
-                    "id": switchId, 
-                    "on": controlState === 0 ? false : true 
-                }, null);
+                let params = {"id": switchId, "on": controlState === 0 ? false : true};
+                enqueueShellyCall("Switch.Set", params, null);
+                params = null;
                 log(LOG.DEBUG, "Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;
             } else {
@@ -482,10 +533,9 @@ function DoControlsCallback(value) {
                     if ((currentUnixTime >= controls[channelEntry].schedules[scheduleEntry].timestamp) && (controls[channelEntry].schedules[scheduleEntry].timestamp > channelLastControlTimeStamps[switchId])) {
                         let controlState = controls[channelEntry].schedules[scheduleEntry].state;
                         let controlTimestamp = controls[channelEntry].schedules[scheduleEntry].timestamp;
-                        enqueueShellyCall("Switch.Set", {
-                            "id": switchId,
-                            "on": controlState === 0 ? false : true 
-                        }, null);
+                        let params = {"id": switchId, "on": controlState === 0 ? false : true};
+                        enqueueShellyCall("Switch.Set", params, null);
+                        params = null;
                         log(LOG.DEBUG, "Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
                         channelLastControlTimeStamps[switchId] = controlTimestamp;
                     }
