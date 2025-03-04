@@ -3,7 +3,7 @@ let VERSION = "Shelly-3.0.0-beta5";
 // Settings
 let CONFIG = {
     updatePeriod: 15000,
-    apiEndpoint: "https://dev.porssari.fi/getcontrols.php",
+    apiEndpoint: "https://api.porssari.fi/getcontrols.php",
     returnTimestamps: 10,
     jsonVersion: 2,
     jsonChannelNames: false,
@@ -531,8 +531,8 @@ function DoControlsCallback(value) {
                 let scheduleKeys = Object.keys(controls[channelEntry].schedules);
                 for (let scheduleEntry in scheduleKeys) {
                     if ((currentUnixTime >= controls[channelEntry].schedules[scheduleEntry].timestamp) && (controls[channelEntry].schedules[scheduleEntry].timestamp > channelLastControlTimeStamps[switchId])) {
-                        let controlState = controls[channelEntry].schedules[scheduleEntry].state;
-                        let controlTimestamp = controls[channelEntry].schedules[scheduleEntry].timestamp;
+                        let controlState = parseInt(controls[channelEntry].schedules[scheduleEntry].state);
+                        let controlTimestamp = parseInt(controls[channelEntry].schedules[scheduleEntry].timestamp);
                         let params = {"id": switchId, "on": controlState === 0 ? false : true};
                         enqueueShellyCall("Switch.Set", params, null);
                         params = null;
