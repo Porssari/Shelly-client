@@ -1,4 +1,4 @@
-let VERSION = "Shelly-3.0.0-beta5";
+let VERSION = "Shelly-3.0.0-beta6";
 
 // Settings
 let CONFIG = {
@@ -43,8 +43,8 @@ function init() {
     try {
         log(LOG.INFO, "Retrieving device information...");
         enqueueShellyCall('Shelly.GetDeviceInfo', {}, InitCallback);
-    } catch (error) {
-        log(LOG.ERROR, "An error occurred while retrieving device information. Stopping script. " + error);
+    } catch (e) {
+        log(LOG.ERROR, "An error occurred while retrieving device information. Stopping script. " + e);
         return;
     }
 }
@@ -56,7 +56,6 @@ function InitCallback(result) {
     result = null;
     scriptId = (parseFloat(shellyFwVer) >= 1.5) ? Script.id : Shelly.getCurrentScriptId();
     
-    // Check if device mac exists
     if (shellyMac.length > 0) {
         log(LOG.DEBUG, "Device info: device " + shellyApp + ", id " + shellyMac + ", firmware version " + shellyFwVer + ", script-id " + scriptId);
     } else {
@@ -64,7 +63,7 @@ function InitCallback(result) {
         return;
     }
     
-    // Initialize control loop timer:
+    // Program loop timer
     mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
     if (!mainTimer) {
         log(LOG.ERROR, "Main timer not initialized. Stopping script.");
@@ -72,70 +71,11 @@ function InitCallback(result) {
         log(LOG.INFO, "Program loop timer initialized");
     }
     
-    // Call startup function: Script Authentication
-    log(LOG.DEBUG, "Calling startup function in 2 seconds: Get auth key from server.");
-    Timer.set(2000, false, InitAuthentication);
-    
-    // Call startup function: Check local control data
-    log(LOG.DEBUG, "Calling startup function in 4 seconds: Load controls data from storage.");
+    log(LOG.DEBUG, "Calling startup function in 2 seconds: Load controls data from storage.");
     Timer.set(4000, false, LoadSavedControldata);
     
-    // Call startup function: Get control data from server
-    log(LOG.DEBUG, "Calling startup function in 6 seconds: Request controls data from server.");
+    log(LOG.DEBUG, "Calling startup function in 4 seconds: Request controls data from server.");
     Timer.set(6000, false, RequestControldata);
-}
-
-// Server authentication
-function InitAuthentication() {
-    try {
-        log(LOG.INFO, "Checking authentication status...");
-        enqueueShellyCall('HTTP.REQUEST',
-            {
-                "method": "POST",
-                "url": CONFIG.apiEndpoint,
-                "headers": { "Content-Type": "application/json" },
-                "body": JSON.stringify({"device_id": shellyMac}),
-            },
-            InitAuthenticationCallback
-        );
-    } catch (error) {
-        log(LOG.WARN, "An error occurred while registering device, sending device data to server is not possible: " + error);
-    }
-}
-
-function InitAuthenticationCallback(result) {
-    if (!result) {
-        log(LOG.WARN, "Unknown error with auth key request");
-        return;
-    }
-    
-    if (result && result.code !== 200) {
-        log(LOG.WARN, "Error with auth key request: ", result.message);
-        return;
-    }
-    
-    let data;
-    try {
-        data = JSON.parse(result.body);
-        log(LOG.DEBUG, "Got valid response for auth key request.");
-    } catch (error) {
-        log(LOG.WARN, "Invalid auth key JSON response:", result.body);
-        return;
-    }
-    result = null;
-    
-    if (!data || typeof data !== "object") {
-        log(LOG.WARN, "Invalid auth key JSON response structure.");
-        return;
-    }
-    
-    if (data.private_key) {
-        log(LOG.DEBUG, "Found private key from data, saving to local storage.");
-        SetStorageValue("porssari_auth", data.private_key);
-    } else {
-        log(LOG.WARN, "Failed to save auth key");
-    }
-    data = null;
 }
 
 // Local data functions
@@ -143,26 +83,27 @@ function LoadSavedControldata() {
     log(LOG.INFO, "Checking for existing data in local storage...");
     try {
         GetStorageValue('metadata', LoadSavedControldataCallback);
-    } catch(error) {
-        log(LOG.INFO, "Saved data not found in local storage: " + error);
+    } catch(e) {
+        log(LOG.INFO, "Saved data not found in local storage: " + e);
     }
 }
 
 function LoadSavedControldataCallback(result) {
     if (!result) {
         log(LOG.WARN, "Saved control data not found from local storage.");
+        return;
     }
     
     let data;
     try {
         data = JSON.parse(result);
+        result = null;
         
         if (!data || typeof data !== "object") {
             log(LOG.WARN, "Invalid JSON structure in saved data.");
             return;
-        }
-        
-        result = null;
+        }        
+
         deviceChannels = data.channels;
         lastRequest = data.timestamp;
         jsonValidUntil = data.valid_until;
@@ -171,8 +112,8 @@ function LoadSavedControldataCallback(result) {
         log(LOG.DEBUG, "Controlled channels: " + deviceChannels + ", valid until: " + jsonValidUntil + ", api endpoint: " + CONFIG.apiEndpoint);
         controlsData = true;
         controlsReady = true;
-    } catch (error) {
-        log(LOG.INFO, "Could not parse metadata from local storage: " + error);
+    } catch (e) {
+        log(LOG.INFO, "Could not parse metadata from local storage: " + e);
     }
 }
 
@@ -196,8 +137,8 @@ function SetStorageValue(baseKey, value) {
             }
             SetStorageValueCallback(baseKey, value, previousParts);
         });
-    } catch (error) {
-        log(LOG.ERROR, "Error retrieving previous chunks for key " + baseKey);
+    } catch (e) {
+        log(LOG.ERROR, "Error retrieving previous chunks for key " + baseKey + ": " + e);
         SetStorageValueCallback(baseKey, value, 0);
     }
 }
@@ -229,8 +170,8 @@ function SetStorageValueCallback(baseKey, value, previousParts) {
         let key = baseKey + "_" + i; 
 
         if (storageType === "KVS") {
-            enqueueShellyCall("KVS.Set", { "key": key, "value": chunk }, function(res, error_code, error_message) {
-                SetKvsValueCallback(res, error_code, error_message, key, null, null);
+            enqueueShellyCall("KVS.Set", { "key": key, "value": chunk }, function(res, errCode, errMsg) {
+                SetKvsValueCallback(res, errCode, errMsg, key, null, null);
             });
         } else {
             Script.storage.setItem(key, chunk);
@@ -244,7 +185,7 @@ function SetStorageValueCallback(baseKey, value, previousParts) {
         for (let i = parts; i < previousParts; i++) {
             let key = baseKey + "_" + i;
             if (storageType === "KVS") {
-                enqueueShellyCall("KVS.Delete", { "key": key }, function(res, error_code, error_message) {
+                enqueueShellyCall("KVS.Delete", { "key": key }, function() {
                     log(LOG.DEBUG, "Deleted old chunk: " + key);
                 });
             } else {
@@ -257,8 +198,8 @@ function SetStorageValueCallback(baseKey, value, previousParts) {
     // Päivitä chunkien määrän tallennus
     let countValue = JSON.stringify({ chunks: parts });
     if (storageType === "KVS") {
-        enqueueShellyCall("KVS.Set", { "key": baseKey, "value": countValue }, function(res, error_code, error_message) {
-            SetKvsValueCallback(res, error_code, error_message, null, baseKey, parts);
+        enqueueShellyCall("KVS.Set", { "key": baseKey, "value": countValue }, function(res, errCode, errMsg) {
+            SetKvsValueCallback(res, errCode, errMsg, null, baseKey, parts);
         });
     } else {
         Script.storage.setItem(baseKey, countValue);
@@ -267,15 +208,15 @@ function SetStorageValueCallback(baseKey, value, previousParts) {
 }
 
 
-function SetKvsValueCallback(res, error_code, error_message, key, baseKey, parts) {
-    if (error_code === 0) {
+function SetKvsValueCallback(res, errCode, errMsg, key, baseKey, parts) {
+    if (errCode === 0) {
         if (key) {
             log(LOG.DEBUG, "Saved chunk " + key + " to KVS.");
         } else if (baseKey && parts) {
             log(LOG.DEBUG, "Saved " + baseKey + " to KVS, chunks count: " + parts);
         }
     } else {
-        log(LOG.ERROR, "Error while saving data to KVS: " + error_message);
+        log(LOG.ERROR, "Error while saving data to KVS: " + errMsg);
     }
 }
 
@@ -283,8 +224,8 @@ function GetStorageValue(baseKey, callback) {
     let storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "KVS";
 
     if (storageType === "KVS") {
-        enqueueShellyCall("KVS.Get", { "key": baseKey }, function(res, error_code, error_message) {
-            handleKvsCountRetrieval(res, error_code, error_message, baseKey, callback);
+        enqueueShellyCall("KVS.Get", { "key": baseKey }, function(res, errCode, errMsg) {
+            handleKvsCountRetrieval(res, errCode, errMsg, baseKey, callback);
         });
     } else {
         let countStr = Script.storage.getItem(baseKey);
@@ -316,42 +257,75 @@ function GetStorageValue(baseKey, callback) {
     }
 }
 
-function handleKvsCountRetrieval(res, error_code, error_message, baseKey, callback) {
-    if (error_code === 0) {
-        try {
-            let parts = parseInt(JSON.parse(res.value).chunks, 10);
-            if (isNaN(parts)) {
-                log(LOG.ERROR, "Chunks count is not valid number.");
-                callback(null);
-                return;
-            }
-        } catch (error) {
-            log(LOG.ERROR, "Invalid value.")
-        }
-        let fullValue = { value: "" };
-        let retrieved = { value: 0 };
+function handleKvsCountRetrieval(res, errCode, errMsg, baseKey, callback) {
+    
+    if (errCode !== 0) {
+        log(LOG.ERROR, "KVS.GetMany error: " + errMsg);
+        callback(null);
+        return;
+    }
 
-        for (let i = 0; i < parts; i++) {
-            let key = baseKey + "_" + i;
-            enqueueShellyCall("KVS.Get", { "key": key }, function(res, errCode, errMsg) {
-                handleKvsPartRetrieval(res, errCode, errMsg, parts, fullValue, retrieved, callback);
-            });
+    try {
+        let parts = parseInt(JSON.parse(res.value).chunks, 10);
+
+        if (isNaN(parts)) {
+            log(LOG.ERROR, "Chunks count is not valid number.");
+            callback(null);
+            return;
         }
-    } else {
-        log(LOG.ERROR, "Error with KVS chunks count for " + baseKey + ": " + error_message);
+
+        enqueueShellyCall("KVS.GetMany", { "match": baseKey + "_?", "offset": 0 }, function(res, errCode, errMsg) {
+            handleKvsRetrieval(res, errCode, errMsg, baseKey, callback);            
+        });
+
+    } catch (e) {
+        log(LOG.ERROR, "Invalid value.")
+    }  
+}
+
+function handleKvsRetrieval(res, errCode, errMsg, baseKey, callback) {
+    if (errCode !== 0) {
+        log(LOG.ERROR, "KVS.GetMany error: " + errMsg);
+        callback(null);
+        return;
+    }
+
+    if (!res.items || res.items.length === 0) {
+        log(LOG.INFO, "No stored chunks found for " + baseKey);
+        callback(null);
+        return;
+    }
+
+    try {
+        let keys = KvsGetManySort(Object.keys(res.items));
+
+        let fullValue = "";
+        for (let i = 0; i < keys.length; i++) {
+            fullValue += res.items[keys[i]].value;
+        }
+        callback(fullValue);
+    } catch (e) {
+        log(LOG.ERROR, "Error retrieving chunks for " + baseKey + ": " + e);
         callback(null);
     }
 }
 
-function handleKvsPartRetrieval(res, error_code, error_message, parts, fullValue, retrieved, callback) {
-    if (error_code === 0) {
-        fullValue.value += res.value;
-    }
-    retrieved.value++;
+function KvsGetManySort(keys) {
+    let length = keys.length;
+    for (let i = 0; i < length - 1; i++) {
+        for (let j = 0; j < length - i - 1; j++) {
+            let numA = parseInt(keys[j].split("_")[1]); 
+            let numB = parseInt(keys[j + 1].split("_")[1]);
 
-    if (retrieved.value === parts) {
-        callback(fullValue.value);
+            if (numA > numB) {
+                // Vaihdetaan paikkoja ilman sort()-metodia
+                let temp = keys[j];
+                keys[j] = keys[j + 1];
+                keys[j + 1] = temp;
+            }
+        }
     }
+    return keys;
 }
 
 // Server request
@@ -362,8 +336,8 @@ function RequestControldata() {
         log(LOG.DEBUG, "URL: " + urlToCall);
         enqueueShellyCall("HTTP.GET", { "url": urlToCall, "timeout": 10, "ssl_ca": "*" }, RequestControldataCallback);
         urlToCall = null;
-    } catch (error) {
-        log(LOG.ERROR, "Error while requesting control data from server: " + error);
+    } catch (e) {
+        log(LOG.ERROR, "Error while requesting control data from server: " + e);
         controlsReady = true;
         cyclesUntilRequest = 18 + Math.floor(3 * Math.random());
         mainCycleCounter = 1;
@@ -371,16 +345,16 @@ function RequestControldata() {
     }
 }
 
-function RequestControldataCallback(res, error_code, error_msg) {
+function RequestControldataCallback(res, errCode, errMsg) {
     let requestInfo;
     
-    if (error_code != 0) {
-        log(LOG.ERROR, "Request error: " + error_code, error_msg);
+    if (errCode != 0) {
+        log(LOG.ERROR, "Request error: " + errCode, errMsg);
         return;
     }
     
     if (!res) {
-        log(LOG.ERROR, "Invalid response: " + error_code, error_msg);
+        log(LOG.ERROR, "Invalid response: " + errCode, errMsg);
         return;
     }
 
@@ -413,8 +387,8 @@ function RequestControldataCallback(res, error_code, error_msg) {
             requestInfo = "Invalid server request. Code: " + res.code;
             res = null;
         }
-    } catch (error) {
-        log(LOG.ERROR, "Control data request failed: " + error)
+    } catch (e) {
+        log(LOG.ERROR, "Control data request failed: " + e)
     }
      
     log(LOG.INFO, "Server request done. " + requestInfo);
@@ -450,8 +424,8 @@ function DoControls() {
     log(LOG.INFO, "Execute controls...");
 	try {
 		GetStorageValue('controls', DoControlsCallback);
-	} catch(error) {
-		log(LOG.INFO, "Error while executing controls: " + error);
+	} catch(e) {
+		log(LOG.INFO, "Error while executing controls: " + e);
 	}
 }
 
@@ -504,8 +478,8 @@ function DoControlsCallback(value) {
             controlsInitialized = true;
             log(LOG.INFO, "Relays initialized.");
             return;
-        } catch (error) {
-            log(LOG.ERROR, "Error while initializing relays to current states: " + error);
+        } catch (e) {
+            log(LOG.ERROR, "Error while initializing relays to current states: " + e);
             controlsInitialized = false;
             return;
         }
@@ -544,8 +518,8 @@ function DoControlsCallback(value) {
             }
         }
         log(LOG.INFO, "Controls executed.");
-    } catch (error) {
-        log(LOG.ERROR, "Controls not executed due to unknown error: " + error);
+    } catch (e) {
+        log(LOG.ERROR, "Controls not executed due to unknown error: " + e);
     }
 }
 
@@ -567,9 +541,9 @@ function processShellyCallQueue() {
     isCallBusy = true;
     let callToExecute = shellyCallQueue[0];
     shellyCallQueue.splice(0, 1); 
-    Shelly.call(callToExecute.method, callToExecute.params, function (res, error_code, error_message) {
+    Shelly.call(callToExecute.method, callToExecute.params, function (res, errCode, errMsg) {
         if (callToExecute.callback) {
-            callToExecute.callback(res, error_code, error_message);
+            callToExecute.callback(res, errCode, errMsg);
         }
         isCallBusy = false;
 
