@@ -1,4 +1,4 @@
-let VERSION = "Shelly-3.0.0-beta6";
+let VERSION = "Shelly-3.0.0-beta7";
 
 // Settings
 let CONFIG = {
@@ -11,17 +11,17 @@ let CONFIG = {
 };
 
 // Global variables
-let shellyApp, shellyMac, shellyFwVer, scriptId, deviceChannels;
+let shellyApp, shellyMac, shellyFwVer, scriptId, deviceChannels, storageType;
 let currentUnixTime, jsonValidUntil, shellyUptime;
 let lastRequest, lastRequestHttpCode;
-let controlsData = controlsInitialized = isCallBusy = isCallDelay = isFailsafe = false;
+let controlsData = controlsInitialized = isTaskBusy = isTaskDelay = isFailsafe = false;
 let mainCycleCounter = 20;
 let cyclesUntilRequest = 20;
 let mainTimer;
 
 // Global dictionaries
 let channelLastControlTimeStamps = [];
-let shellyCallQueue = [];
+let taskQueue = [];
 
 // Logger
 const LOG = {
@@ -31,20 +31,14 @@ const LOG = {
     ERROR: 3
 };
 
-function log(level, message) {
-    if (level >= CONFIG.logLevel) {
-        console.log(message);
-    }
-}
-
 // Program init functions
 function init() {
-    log(LOG.ERROR, "Pörssäri Control Script, version: " + VERSION);
+    (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri Control Script, version: " + VERSION);
     try {
-        log(LOG.INFO, "Retrieving device information...");
-        enqueueShellyCall('Shelly.GetDeviceInfo', {}, InitCallback);
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Retrieving device information...");
+        enqueueTask('shellycall', 'Shelly.GetDeviceInfo', {}, InitCallback);
     } catch (e) {
-        log(LOG.ERROR, "An error occurred while retrieving device information. Stopping script. " + e);
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("An error occurred while retrieving device information. Stopping script. " + e);
         return;
     }
 }
@@ -57,40 +51,45 @@ function InitCallback(result) {
     scriptId = (parseFloat(shellyFwVer) >= 1.5) ? Script.id : Shelly.getCurrentScriptId();
     
     if (shellyMac.length > 0) {
-        log(LOG.DEBUG, "Device info: device " + shellyApp + ", id " + shellyMac + ", firmware version " + shellyFwVer + ", script-id " + scriptId);
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Device info: device " + shellyApp + ", id " + shellyMac + ", firmware version " + shellyFwVer + ", script-id " + scriptId);
     } else {
-        log(LOG.ERROR, "Could not get valid device information. Stopping script.");
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Could not get valid device information. Stopping script.");
         return;
     }
-    
+
+    //storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "KVS";
+    // StorageType is set to KVS due to bug in code with fw 1.5
+    storageType = "KVS";
+
+
     // Program loop timer
     mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
     if (!mainTimer) {
-        log(LOG.ERROR, "Main timer not initialized. Stopping script.");
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Main timer not initialized. Stopping script.");
     } else {
-        log(LOG.INFO, "Program loop timer initialized");
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Program loop timer initialized");
     }
     
-    log(LOG.DEBUG, "Calling startup function in 2 seconds: Load controls data from storage.");
-    Timer.set(4000, false, LoadSavedControldata);
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling startup function in 1 seconds: Load controls data from storage.");
+    Timer.set(1000, false, LoadSavedControldata);
     
-    log(LOG.DEBUG, "Calling startup function in 4 seconds: Request controls data from server.");
-    Timer.set(6000, false, RequestControldata);
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling startup function in 5 seconds: Request controls data from server.");
+    Timer.set(5000, false, RequestControldata);
 }
 
 // Local data functions
 function LoadSavedControldata() {
-    log(LOG.INFO, "Checking for existing data in local storage...");
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Checking for existing data in local storage...");
     try {
         GetStorageValue('metadata', LoadSavedControldataCallback);
     } catch(e) {
-        log(LOG.INFO, "Saved data not found in local storage: " + e);
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Saved data not found in local storage: " + e);
     }
 }
 
 function LoadSavedControldataCallback(result) {
     if (!result) {
-        log(LOG.WARN, "Saved control data not found from local storage.");
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Saved control data not found from local storage.");
         return;
     }
     
@@ -100,7 +99,7 @@ function LoadSavedControldataCallback(result) {
         result = null;
         
         if (!data || typeof data !== "object") {
-            log(LOG.WARN, "Invalid JSON structure in saved data.");
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Invalid JSON structure in saved data.");
             return;
         }        
 
@@ -108,190 +107,172 @@ function LoadSavedControldataCallback(result) {
         lastRequest = data.timestamp;
         jsonValidUntil = data.valid_until;
         data = null;
-        log(LOG.DEBUG, "Found controls data from local storage.");
-        log(LOG.DEBUG, "Controlled channels: " + deviceChannels + ", valid until: " + jsonValidUntil + ", api endpoint: " + CONFIG.apiEndpoint);
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Found controls data from local storage.");
         controlsData = true;
         controlsReady = true;
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Controlled channels: " + deviceChannels + ", valid until: " + jsonValidUntil + ", api endpoint: " + CONFIG.apiEndpoint);
     } catch (e) {
-        log(LOG.INFO, "Could not parse metadata from local storage: " + e);
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved control data not found from local storage: " + e);
     }
 }
 
 function SetStorageValue(baseKey, value) {
-    try {
-        GetStorageValue(baseKey, function (result) {
-            let previousParts = 0;
-            if (result) {
-                try {
-                    let parsedData = JSON.parse(result);
-                    result = null;
-                    if (parsedData.chunks !== undefined) {
-                        previousParts = parsedData.chunks;
-                        parsedData = null;
-                    }
-                } catch (e) {
-                    log(LOG.ERROR, "Failed to parse stored chunk data for key " + baseKey);
-                }
-            } else {
-                log(LOG.DEBUG, "No previous chunks found for key " + baseKey);
-            }
-            SetStorageValueCallback(baseKey, value, previousParts);
-        });
-    } catch (e) {
-        log(LOG.ERROR, "Error retrieving previous chunks for key " + baseKey + ": " + e);
-        SetStorageValueCallback(baseKey, value, 0);
-    }
-}
 
-function SetStorageValueCallback(baseKey, value, previousParts) {
-    let storageType, chunkSize;
+    let chunkSize = (storageType === "ScriptStorage") ? 900 : (storageType === "KVS" ? 200 : 0);
 
-    if (parseFloat(shellyFwVer) >= 1.5) {
-        storageType = "ScriptStorage";
-        chunkSize = 1000;
-    } else {
-        storageType = "KVS";
-        chunkSize = 200;
-    }
-    log(LOG.DEBUG, "Saving data to " + storageType + " with chunk size: " + chunkSize);
-    
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saving data " + baseKey + " to " + storageType + " with chunk size: " + chunkSize);
+
     if (!value) {
-        log(LOG.ERROR, "Error while saving data to local storage: Value not given");
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while saving data to local storage: Value not given");
         return;
     }
 
     value = JSON.stringify(value);
     let parts = Math.ceil(value.length / chunkSize);
+    let chunks = [];
 
-    // Tallenna uudet chunkit
     for (let i = 0; i < parts; i++) {
         let chunk = value.substring(i * chunkSize, (i + 1) * chunkSize);
-        log(LOG.DEBUG, "Chunk length: " + chunk.length);
-        let key = baseKey + "_" + i; 
+        let key = baseKey + "_" + i;
+        chunks[key] = chunk;
+        chunk = null;
+    }
+    value = null;
 
+    try {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Check for previous chunks count for key " + baseKey);
+        enqueueTask("shellycall", "KVS.List", { "match": baseKey + "_*", "offset": 0 }, function (res, errCode, errMsg) {
+            
+            if (errCode !== 0) {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Error fetching existing chunks for " + baseKey);
+                SetStorageValueCallback(baseKey, chunks, parts, 0);
+                return;
+            }
+
+            let previousParts = 0;
+
+            if (!res) {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("No previous chunks found for key " + baseKey);
+                SetStorageValueCallback(baseKey, chunks, parts, previousParts);
+                return;
+            }
+
+            previousParts = res.count;
+     
+            SetStorageValueCallback(baseKey, chunks, parts, previousParts);
+        });
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error retrieving previous chunks for key " + baseKey + ": " + e);
+        SetStorageValueCallback(baseKey, chunks, parts, 0);
+    }
+}
+
+function SetStorageValueCallback(baseKey, chunks, parts, previousParts) {
+    for (let key in chunks) {
         if (storageType === "KVS") {
-            enqueueShellyCall("KVS.Set", { "key": key, "value": chunk }, function(res, errCode, errMsg) {
+            enqueueTask("shellycall", "KVS.Set", { "key": key, "value": chunks[key] }, function(res, errCode, errMsg) {
                 SetKvsValueCallback(res, errCode, errMsg, key, null, null);
             });
         } else {
-            Script.storage.setItem(key, chunk);
-            log(LOG.DEBUG, "Saved chunk " + key + " to " + storageType);
+            enqueueTask("storage", "setItem", { "key": key, "value": chunks[key]}, function() {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved chunk " + key + " to " + storageType);
+            });            
         }
+        chunks[key] = null;
     }
+    chunks = null;
 
-    // Poista ylimääräiset chunkit, jos uusia on vähemmän kuin vanhoja
     if (previousParts > parts) {
-        log(LOG.DEBUG, "Removing " + (previousParts - parts) + " old chunks.");
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Removing " + (previousParts - parts) + " old chunks.");
         for (let i = parts; i < previousParts; i++) {
             let key = baseKey + "_" + i;
             if (storageType === "KVS") {
-                enqueueShellyCall("KVS.Delete", { "key": key }, function() {
-                    log(LOG.DEBUG, "Deleted old chunk: " + key);
+                enqueueTask("shellycall", "KVS.Delete", { "key": key }, function() {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Deleted old chunk: " + key);
                 });
             } else {
-                Script.storage.removeItem(key);
-                log(LOG.DEBUG, "Deleted old chunk: " + key + " from " + storageType);
+                enqueueTask("storage", "removeItem", {"key": key}, function() {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Deleted old chunk: " + key + " from " + storageType);
+                });
             }
         }
     }
 
-    // Päivitä chunkien määrän tallennus
     let countValue = JSON.stringify({ chunks: parts });
-    if (storageType === "KVS") {
-        enqueueShellyCall("KVS.Set", { "key": baseKey, "value": countValue }, function(res, errCode, errMsg) {
-            SetKvsValueCallback(res, errCode, errMsg, null, baseKey, parts);
+    if (storageType === "ScriptStorage") {
+        enqueueTask("storage", "setItem", {"key": baseKey, "value": countValue}, function() {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved key " + baseKey + " in " + parts + " parts.");
         });
-    } else {
-        Script.storage.setItem(baseKey, countValue);
-        log(LOG.DEBUG, "Saved key " + baseKey + " in " + parts + " parts.");
     }
 }
 
 
 function SetKvsValueCallback(res, errCode, errMsg, key, baseKey, parts) {
-    if (errCode === 0) {
-        if (key) {
-            log(LOG.DEBUG, "Saved chunk " + key + " to KVS.");
-        } else if (baseKey && parts) {
-            log(LOG.DEBUG, "Saved " + baseKey + " to KVS, chunks count: " + parts);
-        }
-    } else {
-        log(LOG.ERROR, "Error while saving data to KVS: " + errMsg);
+    if (errCode !== 0) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while saving data to KVS: " + errCode + errMsg);
+        return;
+    }
+
+    if (key) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved chunk " + key + " to KVS.");
+    } else if (baseKey && parts) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved " + baseKey + " to KVS, chunks count: " + parts);
     }
 }
 
 function GetStorageValue(baseKey, callback) {
-    let storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "KVS";
-
     if (storageType === "KVS") {
-        enqueueShellyCall("KVS.Get", { "key": baseKey }, function(res, errCode, errMsg) {
-            handleKvsCountRetrieval(res, errCode, errMsg, baseKey, callback);
+        enqueueTask("shellycall", "KVS.GetMany", { "match": baseKey + "_?", "offset": 0 }, function(res, errCode, errMsg) {
+            handleKvsRetrieval(res, errCode, errMsg, baseKey, callback);            
         });
     } else {
-        let countStr = Script.storage.getItem(baseKey);
-        if (!countStr) {
-            log(LOG.WARN, "Could not find local data for key: " + baseKey);
-            callback(null);
-            return;
-        }
-
-        let parts = parseInt(JSON.parse(countStr).chunks, 10);
-        if (isNaN(parts)) {
-            log(LOG.ERROR, "Chunks count is not valid number.");
-            callback(null);
-            return;
-        }
-
-        let fullValue = "";
-        for (let i = 0; i < parts; i++) {
-            let key = baseKey + "_" + i;
-            let chunk = Script.storage.getItem(key);
-            if (chunk !== null) {
-                fullValue += chunk;
-            }
-            key = null;
-            chunk = null;
-        }
-
-        callback(fullValue);
+        enqueueTask("storage", "getItem", { "key": baseKey }, function(res) {
+            handleStorageCountRetrieval(res, baseKey, callback);
+        });
     }
 }
 
-function handleKvsCountRetrieval(res, errCode, errMsg, baseKey, callback) {
-    
-    if (errCode !== 0) {
-        log(LOG.ERROR, "KVS.GetMany error: " + errMsg);
+
+function handleStoragePartRetrieval(res, errCode, errMsg, parts, fullValue, retrieved, callback) {
+    if (errCode === 0) {
+        fullValue.value += res.value; 
+    }
+
+    retrieved.value++;
+
+    if (retrieved.value === parts) {
+        callback(fullValue.value);
+    }
+}
+
+function handleStorageCountRetrieval(res, baseKey, callback) {
+    if (!res) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while fetching storage chunks count.");
         callback(null);
         return;
     }
 
-    try {
-        let parts = parseInt(JSON.parse(res.value).chunks, 10);
+    let parts = parseInt(JSON.parse(res).chunks, 10);
+    let fullValue = { value: "" };
+    let retrieved = { value: 0 };
 
-        if (isNaN(parts)) {
-            log(LOG.ERROR, "Chunks count is not valid number.");
-            callback(null);
-            return;
-        }
-
-        enqueueShellyCall("KVS.GetMany", { "match": baseKey + "_?", "offset": 0 }, function(res, errCode, errMsg) {
-            handleKvsRetrieval(res, errCode, errMsg, baseKey, callback);            
+    for (let i = 0; i < parts; i++) {
+        let key = baseKey + "_" + i;
+        enqueueTask("storage", "getItem", { key: key }, function(res) {
+            handleStoragePartRetrieval(res, parts, fullValue, retrieved, callback);
         });
-
-    } catch (e) {
-        log(LOG.ERROR, "Invalid value.")
-    }  
+    }
 }
 
 function handleKvsRetrieval(res, errCode, errMsg, baseKey, callback) {
     if (errCode !== 0) {
-        log(LOG.ERROR, "KVS.GetMany error: " + errMsg);
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("KVS.GetMany error with chunks for " + baseKey + ": " + errMsg);
         callback(null);
         return;
     }
 
     if (!res.items || res.items.length === 0) {
-        log(LOG.INFO, "No stored chunks found for " + baseKey);
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("No stored chunks found for " + baseKey);
         callback(null);
         return;
     }
@@ -302,10 +283,13 @@ function handleKvsRetrieval(res, errCode, errMsg, baseKey, callback) {
         let fullValue = "";
         for (let i = 0; i < keys.length; i++) {
             fullValue += res.items[keys[i]].value;
+            res.items[keys[i]].value = null;
         }
+        res = null;
         callback(fullValue);
+        fullValue = null;
     } catch (e) {
-        log(LOG.ERROR, "Error retrieving chunks for " + baseKey + ": " + e);
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Error retrieving chunks for " + baseKey + ": " + e);
         callback(null);
     }
 }
@@ -318,7 +302,6 @@ function KvsGetManySort(keys) {
             let numB = parseInt(keys[j + 1].split("_")[1]);
 
             if (numA > numB) {
-                // Vaihdetaan paikkoja ilman sort()-metodia
                 let temp = keys[j];
                 keys[j] = keys[j + 1];
                 keys[j + 1] = temp;
@@ -331,17 +314,17 @@ function KvsGetManySort(keys) {
 // Server request
 function RequestControldata() {
     try {
-        log(LOG.INFO, "Requesting control data from server...");
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Requesting control data from server...");
         let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + shellyMac + "&last_request=" + (lastRequest || 0) + "&script_version=" + VERSION + "&client_model=" + shellyApp + "&client_fw=" + shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps + "&json_version=" + CONFIG.jsonVersion + "&json_channel_names=" + CONFIG.jsonChannelNames;
-        log(LOG.DEBUG, "URL: " + urlToCall);
-        enqueueShellyCall("HTTP.GET", { "url": urlToCall, "timeout": 10, "ssl_ca": "*" }, RequestControldataCallback);
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("URL: " + urlToCall);
+        enqueueTask("shellycall", "HTTP.GET", { "url": urlToCall, "timeout": 10, "ssl_ca": "*" }, RequestControldataCallback);
         urlToCall = null;
     } catch (e) {
-        log(LOG.ERROR, "Error while requesting control data from server: " + e);
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while requesting control data from server: " + e);
         controlsReady = true;
         cyclesUntilRequest = 18 + Math.floor(3 * Math.random());
         mainCycleCounter = 1;
-        log(LOG.DEBUG, "Resetting request cycle counter. Cycles before next request: " + cyclesUntilRequest);
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Resetting request cycle counter. Cycles before next request: " + cyclesUntilRequest);
     }
 }
 
@@ -349,34 +332,40 @@ function RequestControldataCallback(res, errCode, errMsg) {
     let requestInfo;
     
     if (errCode != 0) {
-        log(LOG.ERROR, "Request error: " + errCode, errMsg);
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Request error: " + errCode, errMsg);
         return;
     }
     
     if (!res) {
-        log(LOG.ERROR, "Invalid response: " + errCode, errMsg);
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Invalid response: " + errCode, errMsg);
         return;
     }
 
     try {
         if (res.code === 200) {
             requestInfo = 'Get controls successful. Code 200.';
-            
-            let metadata = JSON.parse(res.body).metadata
-            SetStorageValue('metadata', metadata);
-            SetStorageValue('controls', JSON.parse(res.body).controls);
-            res = null;
 
+            let parsedBody = JSON.parse(res.body);
+            res = null; 
+            
+            let metadata = parsedBody.metadata;
+            let controls = parsedBody.controls;
+            parsedBody = null;
+
+            SetStorageValue('controls', controls);
+            controls = null;
+
+            SetStorageValue('metadata', metadata);
             deviceChannels = parseInt(metadata.channels);
             CONFIG.apiEndpoint = metadata.fetch_url;
             lastRequest = parseInt(metadata.timestamp);
             jsonValidUntil = parseInt(metadata.valid_until);
-            metadata = null;
-
+            metadata = null;        
+        
             controlsData = true;
 
-            log(LOG.DEBUG, "Controls JSON parsed.");
-            log(LOG.DEBUG, "Controlled channels: " + deviceChannels + ", valid until: " + jsonValidUntil + ", api endpoint: " + CONFIG.apiEndpoint);
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Controls JSON parsed.");
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Controlled channels: " + deviceChannels + ", valid until: " + jsonValidUntil + ", api endpoint: " + CONFIG.apiEndpoint);
         } else if (res.code === 204) {
             requestInfo = "Device found from server without associated loads: " + res.code;
             res = null;
@@ -388,44 +377,52 @@ function RequestControldataCallback(res, errCode, errMsg) {
             res = null;
         }
     } catch (e) {
-        log(LOG.ERROR, "Control data request failed: " + e)
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Control data request failed: " + e)
     }
      
-    log(LOG.INFO, "Server request done. " + requestInfo);
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Server request done. " + requestInfo);
     requestInfo = null;
     controlsReady = true;
 
     cyclesUntilRequest = 18 + Math.floor(3 * Math.random());
     mainCycleCounter = 1;
-    log(LOG.DEBUG, "Resetting request cycle counter. Cycles before next request: " + cyclesUntilRequest);
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Resetting request cycle counter. Cycles before next request: " + cyclesUntilRequest);
 }
 
 // Control data functions
 function CheckControlData() {
-    log(LOG.DEBUG, "Checking if control data is valid."); 
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Checking if control data is valid."); 
     currentUnixTime = Math.floor(Date.now() / 1000);
+    isFailsafe = false;
 
     if (controlsData && jsonValidUntil <= currentUnixTime) {      
-        log(LOG.WARN, "The control schedule is empty. Activating failsafe mode.");
-        isFailsafe = true;
-        return;        
+        (CONFIG.logLevel <= LOG.INFO) && console.log("The control schedule is empty. Activating failsafe mode.");
+        isFailsafe = true;            
     }
 
     if (!controlsData) {
-        log(LOG.WARN, "Control data not available. Activating failsafe mode.");
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Control data not available. Activating failsafe mode.");
         isFailsafe = true;
-        return;
     }
 
-    log(LOG.DEBUG, "Control data is valid for " + parseInt((jsonValidUntil - currentUnixTime) / 60) + " minutes");
+    if (isFailsafe) {
+        if (mainCycleCounter > cyclesUntilRequest) {
+            cyclesUntilRequest = 18 + Math.floor(3 * Math.random());
+            mainCycleCounter = 1;
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Resetting request cycle counter. Cycles before next request: " + cyclesUntilRequest);
+        }
+        return;    
+    }
+
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Control data is valid for " + parseInt((jsonValidUntil - currentUnixTime) / 60) + " minutes");
 }
 
 function DoControls() {
-    log(LOG.INFO, "Execute controls...");
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Execute controls...");
 	try {
 		GetStorageValue('controls', DoControlsCallback);
 	} catch(e) {
-		log(LOG.INFO, "Error while executing controls: " + e);
+		(CONFIG.logLevel <= LOG.INFO) && console.log("Error while executing controls: " + e);
 	}
 }
 
@@ -435,27 +432,27 @@ function DoControlsCallback(value) {
     value = null;
     
     if (!controls || typeof controls !== "object") {
-        log(LOG.ERROR, "Invalid JSON structure, controls not done.");
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Invalid JSON structure, controls not done.");
         return;
     }
     
-    log(LOG.DEBUG, "Found controls data, executing controls.");
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Found controls data, executing controls.");
     let channelKeys = Object.keys(controls);
     if (!channelKeys || channelKeys.length == 0) {
-        log(LOG.WARN, "Could not find any controlled channels from controls data.");
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Could not find any controlled channels from controls data.");
         return;
     }
     
     // Initialize Shelly to current state
     if (!controlsInitialized) {
-        log(LOG.INFO, "Initializing relays to current states...");
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Script has started, initializing relays to current states...");
         try {
             for (let channelEntry in channelKeys) {
                 let switchId = parseInt(controls[channelEntry].id - 1);
                 let controlState = parseInt(controls[channelEntry].state);
                 let controlTimestamp = lastRequest;
-                log(LOG.DEBUG, "Initializing relay " + controls[channelEntry].id);
-                log(LOG.DEBUG, "JSON timestamp: " + controlTimestamp + ", channel state: " + controlState);
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Initializing relay " + controls[channelEntry].id);
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("JSON timestamp: " + controlTimestamp + ", channel state: " + controlState);
                 
                 // Järjestetään aikataulut aikajärjestykseen (vanhimmasta uusimpaan)
                 let scheduleKeys = Object.keys(controls[channelEntry].schedules);
@@ -465,106 +462,139 @@ function DoControlsCallback(value) {
                     if (controls[channelEntry].schedules[scheduleEntry].timestamp < currentUnixTime) {
                         controlState = parseInt(controls[channelEntry].schedules[scheduleEntry].state);
                         controlTimestamp = parseInt(controls[channelEntry].schedules[scheduleEntry].timestamp);
-                        log(LOG.DEBUG, "Passed timestamp: " + controlTimestamp + ", state switched to " + controlState);
+                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Passed timestamp: " + controlTimestamp + ", state switched to " + controlState);
                     }
                 }
                 
                 let params = {"id": switchId, "on": controlState === 0 ? false : true};
-                enqueueShellyCall("Switch.Set", params, null);
+                enqueueTask("shellycall", "Switch.Set", params, null);
                 params = null;
-                log(LOG.DEBUG, "Switched relay " +  controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Switched relay " +  controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;	
             }
             controlsInitialized = true;
-            log(LOG.INFO, "Relays initialized.");
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Relays initialized.");
             return;
         } catch (e) {
-            log(LOG.ERROR, "Error while initializing relays to current states: " + e);
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while initializing relays to current states: " + e);
             controlsInitialized = false;
             return;
         }
     }
     
     // If initialized, read control state from schedule
-    log(LOG.DEBUG, "Relays initialized, reading schedule or updated state.");
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Relays already initialized, reading schedule or updated state.");
 	try {
         for (let channelEntry in channelKeys) {
             let switchId =  parseInt(controls[channelEntry].id - 1);
-            log(LOG.DEBUG, "Relay " + controls[channelEntry].id + ": User settings updated: " + controls[channelEntry].updated + ", last controlled timestamp:" + channelLastControlTimeStamps[switchId]);
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": User settings updated: " + controls[channelEntry].updated + ", last controlled timestamp:" + channelLastControlTimeStamps[switchId]);
             if (parseInt(controls[channelEntry].updated) > parseInt(channelLastControlTimeStamps[switchId])) {
-                log(LOG.DEBUG, "Relay " +  parseInt(controls[channelEntry].id) + ": User settings changed after last controlled timestamp. Controlling to current state.");
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " +  parseInt(controls[channelEntry].id) + ": User settings changed after last controlled timestamp. Controlling to current state.");
                 let controlState = parseInt(controls[channelEntry].state);
                 let controlTimestamp = currentUnixTime;
                 let params = {"id": switchId, "on": controlState === 0 ? false : true};
-                enqueueShellyCall("Switch.Set", params, null);
+                enqueueTask("shellycall", "Switch.Set", params, null);
                 params = null;
-                log(LOG.DEBUG, "Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;
             } else {
-                log(LOG.DEBUG,  "Relay " + controls[channelEntry].id + ": User settings not updated, reading schedule for passed timestamps.");
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": User settings not updated, reading schedule for passed timestamps.");
                 let scheduleKeys = Object.keys(controls[channelEntry].schedules);
                 for (let scheduleEntry in scheduleKeys) {
                     if ((currentUnixTime >= controls[channelEntry].schedules[scheduleEntry].timestamp) && (controls[channelEntry].schedules[scheduleEntry].timestamp > channelLastControlTimeStamps[switchId])) {
                         let controlState = parseInt(controls[channelEntry].schedules[scheduleEntry].state);
                         let controlTimestamp = parseInt(controls[channelEntry].schedules[scheduleEntry].timestamp);
                         let params = {"id": switchId, "on": controlState === 0 ? false : true};
-                        enqueueShellyCall("Switch.Set", params, null);
+                        enqueueTask("shellycall", "Switch.Set", params, null);
                         params = null;
-                        log(LOG.DEBUG, "Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
                         channelLastControlTimeStamps[switchId] = controlTimestamp;
                     }
                 }
-                log(LOG.DEBUG, "Schedule read.");
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Schedule read.");
             }
         }
-        log(LOG.INFO, "Controls executed.");
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Controls executed.");
     } catch (e) {
-        log(LOG.ERROR, "Controls not executed due to unknown error: " + e);
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Controls not executed due to unknown error: " + e);
     }
 }
 
-// Shelly call queue
-function enqueueShellyCall(method, params, callback) {
-    shellyCallQueue.push({ method: method, params: params, callback: callback });
+// Task queue
+function enqueueTask(type, method, params, callback) {
+    taskQueue.push({ type: type, method: method, params: params, callback: callback || null });
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Tasks in queue: " + taskQueue.length);
     
-    if (!isCallBusy && !isCallDelay) {
-        processShellyCallQueue();
+    if (!isTaskBusy && !isTaskDelay) {
+        processTaskQueue();
     }
 }
 
-function processShellyCallQueue() {
-    if (isCallBusy || shellyCallQueue.length === 0) {
-        isCallDelay = false;
+// Prosessoidaan työjono
+function processTaskQueue() {
+    if (isTaskBusy || taskQueue.length === 0) {
+        isTaskDelay = false;
         return;
     }
 
-    isCallBusy = true;
-    let callToExecute = shellyCallQueue[0];
-    shellyCallQueue.splice(0, 1); 
-    Shelly.call(callToExecute.method, callToExecute.params, function (res, errCode, errMsg) {
-        if (callToExecute.callback) {
-            callToExecute.callback(res, errCode, errMsg);
-        }
-        isCallBusy = false;
+    isTaskBusy = true;
+    let taskToExecute = taskQueue[0];
+    taskQueue.splice(0, 1); 
 
-        if (shellyCallQueue.length === 0) {
-            log(LOG.DEBUG, "Call queue is empty.");
-            return;
-        }
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Running task: " + taskToExecute.method);
 
-        if (shellyCallQueue[0].method === "Switch.Set" && callToExecute.method === "Switch.Set") {
-            log(LOG.DEBUG, "Consecutive calls are Switch.Set, setting a delay");
-            isCallDelay = true;
-            Timer.set(5000, false, function () {
-                isCallDelay = false;
-                processShellyCallQueue(); // Recurse after delay
-            });
+    if (taskToExecute.type === "shellycall") {
+
+        Shelly.call(taskToExecute.method, taskToExecute.params, function (res, errCode, errMsg) {
+            isTaskBusy = false;
+            
+            if (taskToExecute.callback) { // ✅ Tarkistetaan, että callback on olemassa
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling callback for " + taskToExecute.method);
+                taskToExecute.callback(res, errCode, errMsg);
+            } else {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("No callback found for task: " + taskToExecute.method);
+            }
+
+            processTaskQueue();
+        });
+    } else if (taskToExecute.type === "storage") {
+        let result = Script.storage.getItem(taskToExecute.params.key);
+        isTaskBusy = false;
+
+        if (taskToExecute.callback) {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling callback for storage task: " + taskToExecute.params.key);
+            taskToExecute.callback(result);
         } else {
-            log(LOG.DEBUG, "No consecutive Switch.Set calls, delay is not needed.");
-            isCallDelay = false;
-            processShellyCallQueue(); // Continue processing without delay
-        }        
-    });
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("No callback found for storage task: " + taskToExecute.params.key);
+        }
+
+        processTaskQueue();
+    } else {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Unknown task type: " + taskToExecute.type);
+        isCallBusy = false;
+        processTaskQueue();
+    }
+}
+
+function handleTaskQueueDelay(task) {
+    if (taskQueue.length === 0) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("All tasks has been done.");
+        isTaskBusy = false;
+        return;
+    }
+
+    if (taskQueue[0].method === "Switch.Set" && task.method === "Switch.Set") {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Consecutive Switch.Set calls detected, setting a delay before the next call.");
+        isTaskBusy = false;
+        isTaskDelay = true;
+        Timer.set(5000, false, function () {
+            isTaskDelay = false;
+            processTaskQueue();
+        });
+    } else {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("No consecutive Switch.Set calls detected, proceeding without delay.");
+        processTaskQueue();
+    }
 }
 
 // Sort schedule for initialization
@@ -592,7 +622,7 @@ function DoFailsafeControls() {
 
 // Script cycle
 function MainCycle() {
-    log(LOG.INFO, "Cycle " + mainCycleCounter + "/" + cyclesUntilRequest + " until next request.");
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Cycle " + mainCycleCounter + "/" + cyclesUntilRequest + " until next request.");
     
     CheckControlData();
     
