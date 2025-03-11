@@ -1,4 +1,4 @@
-let VERSION = "Shelly-3.0.0-beta7";
+let VERSION = "Shelly-3.0.0-beta8";
 
 // Settings
 let CONFIG = {
@@ -14,13 +14,14 @@ let CONFIG = {
 let shellyApp, shellyMac, shellyFwVer, scriptId, deviceChannels, storageType;
 let currentUnixTime, jsonValidUntil, shellyUptime;
 let lastRequest, lastRequestHttpCode;
-let controlsData = controlsInitialized = isTaskBusy = isTaskDelay = isFailsafe = false;
+let controlsData = virtualStatesReady = controlsInitialized = isTaskBusy = isTaskDelay = isFailsafe = false;
 let mainCycleCounter = 20;
 let cyclesUntilRequest = 20;
 let mainTimer;
 
 // Global dictionaries
 let channelLastControlTimeStamps = [];
+let relayStates = [];
 let taskQueue = [];
 
 // Logger
@@ -58,10 +59,8 @@ function InitCallback(result) {
     }
 
     //storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "KVS";
-    // StorageType is set to KVS due to bug in code with fw 1.5
     storageType = "KVS";
-
-
+    
     // Program loop timer
     mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
     if (!mainTimer) {
@@ -171,7 +170,11 @@ function SetStorageValueCallback(baseKey, chunks, parts, previousParts) {
     for (let key in chunks) {
         if (storageType === "KVS") {
             enqueueTask("shellycall", "KVS.Set", { "key": key, "value": chunks[key] }, function(res, errCode, errMsg) {
-                SetKvsValueCallback(res, errCode, errMsg, key, null, null);
+                if (errCode !== 0) {
+                    (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while saving chunk " + key + " to KVS: " + errCode + ", " + errMsg);
+                    return;
+                }
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved chunk " + key + " to KVS.");
             });
         } else {
             enqueueTask("storage", "setItem", { "key": key, "value": chunks[key]}, function() {
@@ -203,20 +206,6 @@ function SetStorageValueCallback(baseKey, chunks, parts, previousParts) {
         enqueueTask("storage", "setItem", {"key": baseKey, "value": countValue}, function() {
             (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved key " + baseKey + " in " + parts + " parts.");
         });
-    }
-}
-
-
-function SetKvsValueCallback(res, errCode, errMsg, key, baseKey, parts) {
-    if (errCode !== 0) {
-        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while saving data to KVS: " + errCode + errMsg);
-        return;
-    }
-
-    if (key) {
-        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved chunk " + key + " to KVS.");
-    } else if (baseKey && parts) {
-        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved " + baseKey + " to KVS, chunks count: " + parts);
     }
 }
 
@@ -278,37 +267,28 @@ function handleKvsRetrieval(res, errCode, errMsg, baseKey, callback) {
     }
 
     try {
-        let keys = KvsGetManySort(Object.keys(res.items));
+        let data = res.items;
+        res = null;
 
         let fullValue = "";
-        for (let i = 0; i < keys.length; i++) {
-            fullValue += res.items[keys[i]].value;
-            res.items[keys[i]].value = null;
+
+        for (let i = 0; i < data.length; i++) {
+            let keyToFind = baseKey + "_" + i;
+            for (let j = 0; j < data.length; j++) {
+                if (data[j].key === keyToFind) {
+                    fullValue += data[j].value;
+                    data[j].value = null;
+                    break;
+                }
+            }  
         }
-        res = null;
+
         callback(fullValue);
-        fullValue = null;
+        fullValue = null; 
     } catch (e) {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Error retrieving chunks for " + baseKey + ": " + e);
         callback(null);
     }
-}
-
-function KvsGetManySort(keys) {
-    let length = keys.length;
-    for (let i = 0; i < length - 1; i++) {
-        for (let j = 0; j < length - i - 1; j++) {
-            let numA = parseInt(keys[j].split("_")[1]); 
-            let numB = parseInt(keys[j + 1].split("_")[1]);
-
-            if (numA > numB) {
-                let temp = keys[j];
-                keys[j] = keys[j + 1];
-                keys[j + 1] = temp;
-            }
-        }
-    }
-    return keys;
 }
 
 // Server request
@@ -418,12 +398,9 @@ function CheckControlData() {
 }
 
 function DoControls() {
-    (CONFIG.logLevel <= LOG.INFO) && console.log("Execute controls...");
-	try {
-		GetStorageValue('controls', DoControlsCallback);
-	} catch(e) {
-		(CONFIG.logLevel <= LOG.INFO) && console.log("Error while executing controls: " + e);
-	}
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Update virtual states for relays...");
+    virtualStatesReady = false;
+    GetStorageValue('controls', DoControlsCallback);
 }
 
 function DoControlsCallback(value) {
@@ -432,11 +409,11 @@ function DoControlsCallback(value) {
     value = null;
     
     if (!controls || typeof controls !== "object") {
-        (CONFIG.logLevel <= LOG.ERROR) && console.log("Invalid JSON structure, controls not done.");
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Invalid JSON structure, virtual states not updated.");
         return;
     }
     
-    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Found controls data, executing controls.");
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Found controls data, updating virtual states...");
     let channelKeys = Object.keys(controls);
     if (!channelKeys || channelKeys.length == 0) {
         (CONFIG.logLevel <= LOG.ERROR) && console.log("Could not find any controlled channels from controls data.");
@@ -445,14 +422,14 @@ function DoControlsCallback(value) {
     
     // Initialize Shelly to current state
     if (!controlsInitialized) {
-        (CONFIG.logLevel <= LOG.INFO) && console.log("Script has started, initializing relays to current states...");
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Script has started, initializing virtual states...");
         try {
             for (let channelEntry in channelKeys) {
                 let switchId = parseInt(controls[channelEntry].id - 1);
                 let controlState = parseInt(controls[channelEntry].state);
                 let controlTimestamp = lastRequest;
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Initializing relay " + controls[channelEntry].id);
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("JSON timestamp: " + controlTimestamp + ", channel state: " + controlState);
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": initializing...");
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": initial JSON state: " + controlState);
                 
                 // Järjestetään aikataulut aikajärjestykseen (vanhimmasta uusimpaan)
                 let scheduleKeys = Object.keys(controls[channelEntry].schedules);
@@ -462,61 +439,129 @@ function DoControlsCallback(value) {
                     if (controls[channelEntry].schedules[scheduleEntry].timestamp < currentUnixTime) {
                         controlState = parseInt(controls[channelEntry].schedules[scheduleEntry].state);
                         controlTimestamp = parseInt(controls[channelEntry].schedules[scheduleEntry].timestamp);
-                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Passed timestamp: " + controlTimestamp + ", state switched to " + controlState);
+                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": passed timestamp: " + controlTimestamp + ", state: " + controlState);
                     }
                 }
                 
-                let params = {"id": switchId, "on": controlState === 0 ? false : true};
-                enqueueTask("shellycall", "Switch.Set", params, null);
-                params = null;
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Switched relay " +  controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                updateVirtualState(switchId, controlState);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;	
             }
             controlsInitialized = true;
-            (CONFIG.logLevel <= LOG.INFO) && console.log("Relays initialized.");
+            virtualStatesReady = true;
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual states initialized.");
             return;
         } catch (e) {
-            (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while initializing relays to current states: " + e);
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while initializing virtual states: " + e);
             controlsInitialized = false;
+            virtualStatesReady = true;
             return;
         }
     }
     
     // If initialized, read control state from schedule
-    (CONFIG.logLevel <= LOG.INFO) && console.log("Relays already initialized, reading schedule or updated state.");
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Reading schedule or updated state...");
 	try {
         for (let channelEntry in channelKeys) {
             let switchId =  parseInt(controls[channelEntry].id - 1);
-            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": User settings updated: " + controls[channelEntry].updated + ", last controlled timestamp:" + channelLastControlTimeStamps[switchId]);
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": settings updated: " + controls[channelEntry].updated + ", last controlled timestamp:" + channelLastControlTimeStamps[switchId]);
             if (parseInt(controls[channelEntry].updated) > parseInt(channelLastControlTimeStamps[switchId])) {
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " +  parseInt(controls[channelEntry].id) + ": User settings changed after last controlled timestamp. Controlling to current state.");
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + parseInt(controls[channelEntry].id) + ": settings updated since the last control timestamp. Switching to the current state.");
                 let controlState = parseInt(controls[channelEntry].state);
                 let controlTimestamp = currentUnixTime;
-                let params = {"id": switchId, "on": controlState === 0 ? false : true};
-                enqueueTask("shellycall", "Switch.Set", params, null);
-                params = null;
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                updateVirtualState(switchId, controlState);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;
             } else {
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": User settings not updated, reading schedule for passed timestamps.");
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": settings not updated since the last control timestamp. Reading schedule for the passed timestamps.");
                 let scheduleKeys = Object.keys(controls[channelEntry].schedules);
                 for (let scheduleEntry in scheduleKeys) {
                     if ((currentUnixTime >= controls[channelEntry].schedules[scheduleEntry].timestamp) && (controls[channelEntry].schedules[scheduleEntry].timestamp > channelLastControlTimeStamps[switchId])) {
                         let controlState = parseInt(controls[channelEntry].schedules[scheduleEntry].state);
                         let controlTimestamp = parseInt(controls[channelEntry].schedules[scheduleEntry].timestamp);
-                        let params = {"id": switchId, "on": controlState === 0 ? false : true};
-                        enqueueTask("shellycall", "Switch.Set", params, null);
-                        params = null;
-                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Switched relay " + controls[channelEntry].id + " to state " + controlState + ", timestamp: "+ controlTimestamp);
+                        updateVirtualState(switchId, controlState);
                         channelLastControlTimeStamps[switchId] = controlTimestamp;
+                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": passed timestamp: " + controlTimestamp + ", state: " + controlState);
                     }
                 }
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Schedule read.");
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + parseInt(controls[channelEntry].id) + ": schedule read.");
             }
         }
-        (CONFIG.logLevel <= LOG.INFO) && console.log("Controls executed.");
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual states updated.");
     } catch (e) {
-        (CONFIG.logLevel <= LOG.INFO) && console.log("Controls not executed due to unknown error: " + e);
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual states not updated due to unknown error: " + e);
+    }
+    virtualStatesReady = true;
+}
+
+function updateVirtualState(switchId, state) {
+    if (!relayStates[switchId]) {
+        relayStates[switchId] = { id: null, virtualState: 0, realState: 0, updated: false, checked: false };
+    }
+
+    relayStates[switchId].virtualState = state;
+    relayStates[switchId].id = switchId;
+    relayStates[switchId].updated = true;
+    relayStates[switchId].checked = false;
+
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Updated virtualState for switch " + switchId +": new virtual state: " + relayStates[switchId].virtualState);
+}
+
+function CheckRelayStates() {
+
+    if (!relayStates) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Could not find any controlled relays.");
+        return;
+    }
+
+    let relayKeys = Object.keys(relayStates);
+
+    if (!relayKeys || relayKeys.length == 0) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Could not find any controlled relays.");
+        return;
+    }
+
+    for (let relayEntry in relayKeys) {
+        let switchId = relayStates[relayEntry].id;
+        enqueueTask("shellycall", "Switch.GetStatus", { id: switchId }, CheckRelayStatesCallback);
+    }
+}
+
+function CheckRelayStatesCallback(res, errCode, errMsg) {
+
+    if (errCode !== 0 || !res) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error with switch data." + errMsg);
+        return;
+    }
+    
+    try {
+        let switchId = parseInt(res.id);
+        relayStates[switchId].realState = res.output ? 1 : 0;
+        res = null;
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Updated state information for switch " + switchId +": virtual state: " + relayStates[switchId].virtualState + ", real state: " + relayStates[switchId].realState + ", updated: " + relayStates[switchId].updated + ", checked: " + relayStates[switchId].checked);
+
+        if (relayStates[switchId].updated) {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Virtual state updated for switch " + switchId + ", executing controls...");
+            let state = relayStates[switchId].virtualState;
+            enqueueTask("shellycall", "Switch.Set", { "id": switchId, "on": state === 1 ? true : false }, function() {
+                relayStates[switchId].updated = false;
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Switch " +  switchId + " set to state " +  state);   
+            });
+            return;
+        }
+
+        if ((!relayStates[switchId].checked) && (relayStates[switchId].virtualState !== relayStates[switchId].realState)) {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("State not updated correctly for switch " + switchId + ", executing controls...");
+            let state = relayStates[switchId].virtualState;
+            enqueueTask("shellycall", "Switch.Set", { "id": switchId, "on": state === 1 ? true : false }, function() {
+                relayStates[switchId].updated = false;
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Switch " +  switchId + " set to state " +  state);   
+            });
+            return;
+        } else if (!relayStates[switchId].checked) {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("State updated correctly for switch " + switchId);
+            relayStates[switchId].checked = true;
+        }
+    } catch(e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error with switch data." + e);
     }
 }
 
@@ -541,14 +586,16 @@ function processTaskQueue() {
     let taskToExecute = taskQueue[0];
     taskQueue.splice(0, 1); 
 
-    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Running task: " + taskToExecute.method);
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Running task: " + taskToExecute.method + " with params: " + JSON.stringify(taskToExecute.params));
 
     if (taskToExecute.type === "shellycall") {
+
+
 
         Shelly.call(taskToExecute.method, taskToExecute.params, function (res, errCode, errMsg) {
             isTaskBusy = false;
             
-            if (taskToExecute.callback) { // ✅ Tarkistetaan, että callback on olemassa
+            if (taskToExecute.callback) {
                 (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling callback for " + taskToExecute.method);
                 taskToExecute.callback(res, errCode, errMsg);
             } else {
@@ -623,6 +670,8 @@ function DoFailsafeControls() {
 // Script cycle
 function MainCycle() {
     (CONFIG.logLevel <= LOG.INFO) && console.log("Cycle " + mainCycleCounter + "/" + cyclesUntilRequest + " until next request.");
+    
+    CheckRelayStates();
     
     CheckControlData();
     
