@@ -7,7 +7,7 @@ let CONFIG = {
     returnTimestamps: 10,
     jsonVersion: 2,
     jsonChannelNames: false,
-    logLevel: 0, // 0=debug, 1=info, 2=warn, 3=error
+    logLevel: 1, // 0=debug, 1=info, 2=warn, 3=error
 };
 
 // Global variables
@@ -398,7 +398,7 @@ function CheckControlData() {
 }
 
 function DoControls() {
-    (CONFIG.logLevel <= LOG.INFO) && console.log("Update virtual states for relays...");
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Updating virtual states for relays...");
     virtualStatesReady = false;
     GetStorageValue('controls', DoControlsCallback);
 }
@@ -518,6 +518,7 @@ function CheckRelayStates() {
         (CONFIG.logLevel <= LOG.ERROR) && console.log("Could not find any controlled relays.");
         return;
     }
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Checking relay states...");
 
     for (let relayEntry in relayKeys) {
         let switchId = relayStates[relayEntry].id;
@@ -543,7 +544,8 @@ function CheckRelayStatesCallback(res, errCode, errMsg) {
             let state = relayStates[switchId].virtualState;
             enqueueTask("shellycall", "Switch.Set", { "id": switchId, "on": state === 1 ? true : false }, function() {
                 relayStates[switchId].updated = false;
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Switch " +  switchId + " set to state " +  state);   
+                let relay = switchId + 1;
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Relay " + relay + ": switched to state: " + state);   
             });
             return;
         }
@@ -553,12 +555,19 @@ function CheckRelayStatesCallback(res, errCode, errMsg) {
             let state = relayStates[switchId].virtualState;
             enqueueTask("shellycall", "Switch.Set", { "id": switchId, "on": state === 1 ? true : false }, function() {
                 relayStates[switchId].updated = false;
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Switch " +  switchId + " set to state " +  state);   
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Switch " +  switchId + " set to state " +  state);   
             });
             return;
         } else if (!relayStates[switchId].checked) {
-            (CONFIG.logLevel <= LOG.DEBUG) && console.log("State updated correctly for switch " + switchId);
+            let relay = switchId + 1;
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Relay " + relay + ": state checked after passed timestamp.");
             relayStates[switchId].checked = true;
+        } else if ((relayStates[switchId].checked) && (relayStates[switchId].virtualState !== relayStates[switchId].realState)) {
+            let relay = switchId + 1;
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Relay " + relay + ": relay state is switched by user.");
+        } else if (relayStates[switchId].checked) {
+            let relay = switchId + 1;
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Relay " + relay + ": relay state is up to date.");
         }
     } catch(e) {
         (CONFIG.logLevel <= LOG.ERROR) && console.log("Error with switch data." + e);
