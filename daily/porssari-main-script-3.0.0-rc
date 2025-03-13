@@ -1,4 +1,4 @@
-let VERSION = "Shelly-3.0.0-rc1";
+let VERSION = "Shelly-3.0.0-rc2";
 
 // Settings
 let CONFIG = {
@@ -192,7 +192,8 @@ function SetStorageValueCallback(baseKey, chunks, parts, previousParts) {
         if (storageType === "KVS") {
             enqueueTask("shellycall", "KVS.Set", { "key": key, "value": chunks[key] }, null);
         } else if (storageType === "ScriptStorage") {
-            enqueueTask("storage", "setItem", { "key": key, "value": chunks[key]}, null);            
+            Script.storage.setItem(key, chunks[key]);
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved to ScriptStorage: " + key);
         } else {
             (CONFIG.logLevel <= LOG.ERROR) && console.log("Unknown storage type: " + storageType);
             return;
@@ -210,18 +211,10 @@ function SetStorageValueCallback(baseKey, chunks, parts, previousParts) {
                     (CONFIG.logLevel <= LOG.DEBUG) && console.log("Deleted old chunk: " + key);
                 });
             } else {
-                enqueueTask("storage", "removeItem", {"key": key}, function() {
-                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Deleted old chunk: " + key + " from " + storageType);
-                });
+                Script.storage.removeItem(key);
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Removed chunk: " + key + " from " + storageType);
             }
         }
-    }
-
-    let countValue = JSON.stringify({ chunks: parts });
-    if (storageType === "ScriptStorage") {
-        enqueueTask("storage", "setItem", {"key": baseKey, "value": countValue}, function() {
-            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved key " + baseKey + " in " + parts + " parts.");
-        });
     }
 }
 
@@ -231,38 +224,31 @@ function GetStorageValue(baseKey, callback) {
             handleKvsRetrieval(res, errCode, errMsg, baseKey, callback);            
         });
     } else {
-        handleStorageRetrieval(baseKey, callback);
-    }
-}
+        let parts = 0;
 
-function handleStorageRetrieval(baseKey, callback) {
-
-    let parts = 0;
-
-    for (let i = 0; i < Script.storage.length; i++) {
-        const key = Script.storage.key(i);
-        if (key.indexOf(baseKey) === 0) {
-            parts += 1;
+        for (let i = 0; i < Script.storage.length; i++) {
+            const key = Script.storage.key(i);
+            if (key.indexOf(baseKey) === 0) {
+                parts += 1;
+            }
         }
-    }
 
-    let fullValue = "";
+        let fullValue = "";
 
-    for (let i = 0; i < parts; i++) {
-        let keyToFind = baseKey + "_" + i;
-        for (let j = 0; j < Script.storage.length; j++) {
-            const key = Script.storage.key(j);
-            if (key === keyToFind) {
-                fullValue += Script.storage.getItem(key);
-                break;           
-            }  
+        for (let i = 0; i < parts; i++) {
+            let keyToFind = baseKey + "_" + i;
+            for (let j = 0; j < Script.storage.length; j++) {
+                const key = Script.storage.key(j);
+                if (key === keyToFind) {
+                    fullValue += Script.storage.getItem(key);
+                    break;           
+                }  
+            }
         }
+        callback(atob(fullValue));
+        callback = null;
+        fullValue = null;    
     }
-
-    callback(atob(fullValue));
-    callback = null;
-    fullValue = null;
-
 }
 
 function handleKvsRetrieval(res, errCode, errMsg, baseKey, callback) {
@@ -614,58 +600,34 @@ function processTaskQueue() {
 
     isTaskBusy = true;
     try {
-      let taskToExecute = taskQueue[0];
-      taskQueue.splice(0, 1); 
+        let taskToExecute = taskQueue[0];
+        taskQueue.splice(0, 1); 
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Running task: " + taskToExecute.method + " with params: " + JSON.stringify(taskToExecute.params));
 
-      (CONFIG.logLevel <= LOG.DEBUG) && console.log("Running task: " + taskToExecute.method + " with params: " + JSON.stringify(taskToExecute.params));
-
-      if (taskToExecute.type === "shellycall") {
-
-        Shelly.call(taskToExecute.method, taskToExecute.params, function (res, errCode, errMsg) {
-            
-            if (taskToExecute.callback) {
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling callback for " + taskToExecute.method);
-                taskToExecute.callback(res, errCode, errMsg);
-                taskToExecute.callback = null;
-            } else {
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("No callback found for task: " + taskToExecute.method);
-            }
-
-            isTaskBusy = false;
-            processTaskQueue();
-        });
-    } else if (taskToExecute.type === "storage") {
-        let result;
-        if (taskToExecute.method === "setItem") {
-            result = Script.storage.setItem(taskToExecute.params.key, taskToExecute.params.value);
-        } else if (taskToExecute.method === "getItem") {
-            result = Script.storage.getItem(taskToExecute.params.key);
+        if (taskToExecute.type === "shellycall") {
+            Shelly.call(taskToExecute.method, taskToExecute.params, function (res, errCode, errMsg) {
+                if (taskToExecute.callback) {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling callback for " + taskToExecute.method);
+                    taskToExecute.callback(res, errCode, errMsg);
+                    taskToExecute.callback = null;
+                } else {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("No callback found for task: " + taskToExecute.method);
+                }
+                handleTaskQueueDelay(taskToExecute);
+            });
         } else {
-            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Unknown storage method: " + taskToExecute.method);
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Unknown task type: " + taskToExecute.type);
+            handleTaskQueueDelay(taskToExecute);
         }
-        
-        if (taskToExecute.callback) {
-            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling callback for storage task: " + taskToExecute.params.key);
-            taskToExecute.callback(result);
-            taskToExecute.callback = null;
-        } else {
-            (CONFIG.logLevel <= LOG.DEBUG) && console.log("No callback found for storage task: " + taskToExecute.params.key);
-        }
-
-        isTaskBusy = false;
-        processTaskQueue();
-    } else {
-        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Unknown task type: " + taskToExecute.type);
-        isCallBusy = false;
-        processTaskQueue();
-    }
     } catch(e) {
-      print(e);
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error with task: " + taskToExecute.method + " with params: " + JSON.stringify(taskToExecute.params) + ": " + e);
+        processTaskQueue()
     }
 }
 
 function handleTaskQueueDelay(task) {
     if (taskQueue.length === 0) {
+        task = null;
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("All tasks has been done.");
         isTaskBusy = false;
         return;
