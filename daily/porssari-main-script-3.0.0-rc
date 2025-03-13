@@ -1,4 +1,4 @@
-let VERSION = "Shelly-3.0.0-rc2";
+let VERSION = "Shelly-3.0.0-rc1";
 
 // Settings
 let CONFIG = {
@@ -116,7 +116,7 @@ function LoadSavedControldataCallback(result) {
 
 function SetStorageValue(baseKey, value) {
 
-    let chunkSize = (storageType === "ScriptStorage") ? 1000 : (storageType === "KVS" ? 240 : 0);
+    let chunkSize = (storageType === "ScriptStorage") ? 1000 : (storageType === "KVS" ? 230 : 0);
 
     (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saving data " + baseKey + " to " + storageType + " with chunk size: " + chunkSize);
 
@@ -125,7 +125,6 @@ function SetStorageValue(baseKey, value) {
         return;
     }
 
-    //value = JSON.stringify(value);
     value = btoa(JSON.stringify(value));
     let parts = Math.ceil(value.length / chunkSize);
     let chunks = [];
@@ -266,7 +265,14 @@ function handleKvsRetrieval(res, errCode, errMsg, baseKey, callback) {
     }
 
     try {
-        let data = res.items;
+        let data = [];
+       
+        for (let key in res.items) {
+            if (res.items.hasOwnProperty(key) && res.items[key].value) {
+                data.push({ key: key, value: res.items[key].value });
+            }
+        }
+
         res = null;
 
         let fullValue = "";
@@ -274,17 +280,27 @@ function handleKvsRetrieval(res, errCode, errMsg, baseKey, callback) {
         for (let i = 0; i < data.length; i++) {
             let keyToFind = baseKey + "_" + i;
             for (let j = 0; j < data.length; j++) {
-                if (data[j].key === keyToFind) {
+                let key = data[j].key;
+                if (!data[j].value || typeof data[j].value !== "string") {
+                    (CONFIG.logLevel <= LOG.ERROR) && console.log("Skipping invalid or missing value for key: " + key);
+                    continue;
+                }
+                if (key === keyToFind) {
                     fullValue += data[j].value;
                     data[j].value = null;
                     break;
                 }
-            }  
+            }
         }
 
+        // Tarkistetaan, ettei fullValue ole tyhjä ennen Base64-dekoodausta
+        if (!fullValue || fullValue.length === 0) {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Error: fullValue is empty, skipping atob()");
+            callback(null);
+            return;
+        }
         callback(atob(fullValue));
         callback = null;
-        fullValue = null; 
     } catch (e) {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Error retrieving chunks for " + baseKey + ": " + e);
         callback(null);
@@ -612,14 +628,17 @@ function processTaskQueue() {
                 } else {
                     (CONFIG.logLevel <= LOG.DEBUG) && console.log("No callback found for task: " + taskToExecute.method);
                 }
+                isTaskBusy = false;
                 handleTaskQueueDelay(taskToExecute);
             });
         } else {
             (CONFIG.logLevel <= LOG.DEBUG) && console.log("Unknown task type: " + taskToExecute.type);
+            isTaskBusy = false;
             handleTaskQueueDelay(taskToExecute);
         }
     } catch(e) {
         (CONFIG.logLevel <= LOG.ERROR) && console.log("Error with task: " + taskToExecute.method + " with params: " + JSON.stringify(taskToExecute.params) + ": " + e);
+        isTaskBusy = false;
         processTaskQueue()
     }
 }
@@ -628,13 +647,12 @@ function handleTaskQueueDelay(task) {
     if (taskQueue.length === 0) {
         task = null;
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("All tasks has been done.");
-        isTaskBusy = false;
+        
         return;
     }
 
     if (taskQueue[0].method === "Switch.Set" && task.method === "Switch.Set") {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Consecutive Switch.Set calls detected, setting a delay before the next call.");
-        isTaskBusy = false;
         isTaskDelay = true;
         Timer.set(5000, false, function () {
             isTaskDelay = false;
@@ -671,10 +689,10 @@ function DoFailsafeControls() {
 
 // Script cycle
 function MainCycle() {
+  
     (CONFIG.logLevel <= LOG.INFO) && console.log("Cycle " + mainCycleCounter + "/" + cyclesUntilRequest + " until next request.");
     
-    let checkStates = CheckRelayStates();
-    checkStates = null;
+    CheckRelayStates();
     
     CheckControlData();
     
