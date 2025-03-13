@@ -59,7 +59,6 @@ function InitCallback(result) {
     }
 
     storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "KVS";
-    //storageType = "KVS";
     
     // Program loop timer
     mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
