@@ -1,4 +1,4 @@
-let VERSION = "Shelly-3.0.0-beta8";
+let VERSION = "Shelly-3.0.0-rc1";
 
 // Settings
 let CONFIG = {
@@ -7,7 +7,7 @@ let CONFIG = {
     returnTimestamps: 10,
     jsonVersion: 2,
     jsonChannelNames: false,
-    logLevel: 1, // 0=debug, 1=info, 2=warn, 3=error
+    logLevel: 0, // 0=debug, 1=info, 2=warn, 3=error
 };
 
 // Global variables
@@ -58,8 +58,8 @@ function InitCallback(result) {
         return;
     }
 
-    //storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "KVS";
-    storageType = "KVS";
+    storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "KVS";
+    //storageType = "KVS";
     
     // Program loop timer
     mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
@@ -117,7 +117,7 @@ function LoadSavedControldataCallback(result) {
 
 function SetStorageValue(baseKey, value) {
 
-    let chunkSize = (storageType === "ScriptStorage") ? 900 : (storageType === "KVS" ? 200 : 0);
+    let chunkSize = (storageType === "ScriptStorage") ? 1000 : (storageType === "KVS" ? 240 : 0);
 
     (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saving data " + baseKey + " to " + storageType + " with chunk size: " + chunkSize);
 
@@ -126,7 +126,8 @@ function SetStorageValue(baseKey, value) {
         return;
     }
 
-    value = JSON.stringify(value);
+    //value = JSON.stringify(value);
+    value = btoa(JSON.stringify(value));
     let parts = Math.ceil(value.length / chunkSize);
     let chunks = [];
 
@@ -140,26 +141,46 @@ function SetStorageValue(baseKey, value) {
 
     try {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Check for previous chunks count for key " + baseKey);
-        enqueueTask("shellycall", "KVS.List", { "match": baseKey + "_*", "offset": 0 }, function (res, errCode, errMsg) {
-            
-            if (errCode !== 0) {
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Error fetching existing chunks for " + baseKey);
-                SetStorageValueCallback(baseKey, chunks, parts, 0);
-                return;
-            }
+        
+        if (storageType === "KVS") {
+            enqueueTask("shellycall", "KVS.List", { "match": baseKey + "_*", "offset": 0 }, function (res, errCode, errMsg) {
 
+                let previousParts = 0;
+            
+                if (errCode !== 0) {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Error fetching existing chunks from KVS for " + baseKey);
+                    SetStorageValueCallback(baseKey, chunks, parts, previousParts);
+                    return;
+                }
+
+                if (!res) {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("No previous chunks found from KVS for key " + baseKey);
+                    SetStorageValueCallback(baseKey, chunks, parts, previousParts);
+                    return;
+                }
+            
+                previousParts = Object.keys(res.keys).length;
+                res = null;        
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Found " + previousParts + " chunks from KVS for key " + baseKey);     
+                SetStorageValueCallback(baseKey, chunks, parts, previousParts);
+            });
+        } else if (storageType === "ScriptStorage") {
+            
             let previousParts = 0;
 
-            if (!res) {
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("No previous chunks found for key " + baseKey);
-                SetStorageValueCallback(baseKey, chunks, parts, previousParts);
-                return;
+            for (let i = 0; i < Script.storage.length; i++) {
+                const key = Script.storage.key(i);
+                if (key.indexOf(baseKey) === 0) {
+                    previousParts += 1;
+                }
             }
-
-            previousParts = res.count;
-     
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Found " + previousParts + " chunks from ScriptStorage for key " + baseKey);
             SetStorageValueCallback(baseKey, chunks, parts, previousParts);
-        });
+            return;
+        } else {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Unknown storage type: " + storageType);
+            return;
+        }
     } catch (e) {
         (CONFIG.logLevel <= LOG.ERROR) && console.log("Error retrieving previous chunks for key " + baseKey + ": " + e);
         SetStorageValueCallback(baseKey, chunks, parts, 0);
@@ -169,17 +190,12 @@ function SetStorageValue(baseKey, value) {
 function SetStorageValueCallback(baseKey, chunks, parts, previousParts) {
     for (let key in chunks) {
         if (storageType === "KVS") {
-            enqueueTask("shellycall", "KVS.Set", { "key": key, "value": chunks[key] }, function(res, errCode, errMsg) {
-                if (errCode !== 0) {
-                    (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while saving chunk " + key + " to KVS: " + errCode + ", " + errMsg);
-                    return;
-                }
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved chunk " + key + " to KVS.");
-            });
+            enqueueTask("shellycall", "KVS.Set", { "key": key, "value": chunks[key] }, null);
+        } else if (storageType === "ScriptStorage") {
+            enqueueTask("storage", "setItem", { "key": key, "value": chunks[key]}, null);            
         } else {
-            enqueueTask("storage", "setItem", { "key": key, "value": chunks[key]}, function() {
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved chunk " + key + " to " + storageType);
-            });            
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Unknown storage type: " + storageType);
+            return;
         }
         chunks[key] = null;
     }
@@ -215,54 +231,52 @@ function GetStorageValue(baseKey, callback) {
             handleKvsRetrieval(res, errCode, errMsg, baseKey, callback);            
         });
     } else {
-        enqueueTask("storage", "getItem", { "key": baseKey }, function(res) {
-            handleStorageCountRetrieval(res, baseKey, callback);
-        });
+        handleStorageRetrieval(baseKey, callback);
     }
 }
 
+function handleStorageRetrieval(baseKey, callback) {
 
-function handleStoragePartRetrieval(res, errCode, errMsg, parts, fullValue, retrieved, callback) {
-    if (errCode === 0) {
-        fullValue.value += res.value; 
+    let parts = 0;
+
+    for (let i = 0; i < Script.storage.length; i++) {
+        const key = Script.storage.key(i);
+        if (key.indexOf(baseKey) === 0) {
+            parts += 1;
+        }
     }
 
-    retrieved.value++;
-
-    if (retrieved.value === parts) {
-        callback(fullValue.value);
-    }
-}
-
-function handleStorageCountRetrieval(res, baseKey, callback) {
-    if (!res) {
-        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while fetching storage chunks count.");
-        callback(null);
-        return;
-    }
-
-    let parts = parseInt(JSON.parse(res).chunks, 10);
-    let fullValue = { value: "" };
-    let retrieved = { value: 0 };
+    let fullValue = "";
 
     for (let i = 0; i < parts; i++) {
-        let key = baseKey + "_" + i;
-        enqueueTask("storage", "getItem", { key: key }, function(res) {
-            handleStoragePartRetrieval(res, parts, fullValue, retrieved, callback);
-        });
+        let keyToFind = baseKey + "_" + i;
+        for (let j = 0; j < Script.storage.length; j++) {
+            const key = Script.storage.key(j);
+            if (key === keyToFind) {
+                fullValue += Script.storage.getItem(key);
+                break;           
+            }  
+        }
     }
+
+    callback(atob(fullValue));
+    callback = null;
+    fullValue = null;
+
 }
 
 function handleKvsRetrieval(res, errCode, errMsg, baseKey, callback) {
     if (errCode !== 0) {
         (CONFIG.logLevel <= LOG.ERROR) && console.log("KVS.GetMany error with chunks for " + baseKey + ": " + errMsg);
         callback(null);
+        callback = null;
         return;
     }
 
     if (!res.items || res.items.length === 0) {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("No stored chunks found for " + baseKey);
         callback(null);
+        callback = null;
         return;
     }
 
@@ -283,11 +297,13 @@ function handleKvsRetrieval(res, errCode, errMsg, baseKey, callback) {
             }  
         }
 
-        callback(fullValue);
+        callback(atob(fullValue));
+        callback = null;
         fullValue = null; 
     } catch (e) {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Error retrieving chunks for " + baseKey + ": " + e);
         callback(null);
+        callback = null;
     }
 }
 
@@ -417,6 +433,7 @@ function DoControlsCallback(value) {
     let channelKeys = Object.keys(controls);
     if (!channelKeys || channelKeys.length == 0) {
         (CONFIG.logLevel <= LOG.ERROR) && console.log("Could not find any controlled channels from controls data.");
+        controls = null;
         return;
     }
     
@@ -446,14 +463,16 @@ function DoControlsCallback(value) {
                 updateVirtualState(switchId, controlState);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;	
             }
+            controls = null;
             controlsInitialized = true;
             virtualStatesReady = true;
             (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual states initialized.");
             return;
         } catch (e) {
-            (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while initializing virtual states: " + e);
+            controls = null;
             controlsInitialized = false;
             virtualStatesReady = true;
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while initializing virtual states: " + e);
             return;
         }
     }
@@ -485,8 +504,10 @@ function DoControlsCallback(value) {
                 (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + parseInt(controls[channelEntry].id) + ": schedule read.");
             }
         }
+        controls = null;
         (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual states updated.");
     } catch (e) {
+        controls = null;
         (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual states not updated due to unknown error: " + e);
     }
     virtualStatesReady = true;
@@ -592,43 +613,54 @@ function processTaskQueue() {
     }
 
     isTaskBusy = true;
-    let taskToExecute = taskQueue[0];
-    taskQueue.splice(0, 1); 
+    try {
+      let taskToExecute = taskQueue[0];
+      taskQueue.splice(0, 1); 
 
-    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Running task: " + taskToExecute.method + " with params: " + JSON.stringify(taskToExecute.params));
+      (CONFIG.logLevel <= LOG.DEBUG) && console.log("Running task: " + taskToExecute.method + " with params: " + JSON.stringify(taskToExecute.params));
 
-    if (taskToExecute.type === "shellycall") {
-
-
+      if (taskToExecute.type === "shellycall") {
 
         Shelly.call(taskToExecute.method, taskToExecute.params, function (res, errCode, errMsg) {
-            isTaskBusy = false;
             
             if (taskToExecute.callback) {
                 (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling callback for " + taskToExecute.method);
                 taskToExecute.callback(res, errCode, errMsg);
+                taskToExecute.callback = null;
             } else {
                 (CONFIG.logLevel <= LOG.DEBUG) && console.log("No callback found for task: " + taskToExecute.method);
             }
 
+            isTaskBusy = false;
             processTaskQueue();
         });
     } else if (taskToExecute.type === "storage") {
-        let result = Script.storage.getItem(taskToExecute.params.key);
-        isTaskBusy = false;
-
+        let result;
+        if (taskToExecute.method === "setItem") {
+            result = Script.storage.setItem(taskToExecute.params.key, taskToExecute.params.value);
+        } else if (taskToExecute.method === "getItem") {
+            result = Script.storage.getItem(taskToExecute.params.key);
+        } else {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Unknown storage method: " + taskToExecute.method);
+        }
+        
         if (taskToExecute.callback) {
             (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling callback for storage task: " + taskToExecute.params.key);
             taskToExecute.callback(result);
+            taskToExecute.callback = null;
         } else {
             (CONFIG.logLevel <= LOG.DEBUG) && console.log("No callback found for storage task: " + taskToExecute.params.key);
         }
 
+        isTaskBusy = false;
         processTaskQueue();
     } else {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Unknown task type: " + taskToExecute.type);
         isCallBusy = false;
         processTaskQueue();
+    }
+    } catch(e) {
+      print(e);
     }
 }
 
@@ -680,7 +712,8 @@ function DoFailsafeControls() {
 function MainCycle() {
     (CONFIG.logLevel <= LOG.INFO) && console.log("Cycle " + mainCycleCounter + "/" + cyclesUntilRequest + " until next request.");
     
-    CheckRelayStates();
+    let checkStates = CheckRelayStates();
+    checkStates = null;
     
     CheckControlData();
     
