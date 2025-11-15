@@ -419,37 +419,57 @@ function DoControlsCallback(value) {
     if (!controlsInitialized) {
         (CONFIG.logLevel <= LOG.INFO) && console.log("Script has started, initializing virtual states...");
         try {
+            // Esilasketaan per-kanava lähtötila channelDataCachen ja lastRequestin perusteella
+            let baseState = [];
+            let baseTimestamp = [];
+
             for (let ch = 1; ch <= deviceChannels; ch++) {
                 let switchId = ch - 1;
-
-                // Peruslähtötila channelDataCachen mukaan, jos olemassa
-                let controlState = 0;
-                let controlTimestamp = lastRequest || 0;
+                baseState[switchId] = 0;
+                baseTimestamp[switchId] = lastRequest || 0;
 
                 if (channelDataCache && channelDataCache[switchId]) {
                     if (channelDataCache[switchId].state !== undefined) {
-                        controlState = parseInt(channelDataCache[switchId].state);
+                        baseState[switchId] = parseInt(channelDataCache[switchId].state);
+                    }
+                    if (channelDataCache[switchId].updated !== undefined) {
+                        let updTs = parseInt(channelDataCache[switchId].updated);
+                        if (!isNaN(updTs) && updTs > baseTimestamp[switchId]) {
+                            baseTimestamp[switchId] = updTs;
+                        }
                     }
                 }
 
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": initializing, base state from channel_data: " + controlState);
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": initializing, base state from channel_data: " + baseState[switchId] + ", base ts: " + baseTimestamp[switchId]);
+            }
 
-                // Käydään läpi kaikki menneet aikataulurivit kyseiselle kanavalle
-                for (let i = 0; i < schedule.length; i++) {
-                    let row = schedule[i];
-                    let ts = parseInt(row[0]);
-                    let channel = parseInt(row[1]);
-                    let state = parseInt(row[2]);
-
-                    if (channel === ch && ts < currentUnixTime) {
-                        controlState = state;
-                        controlTimestamp = ts;
-                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": passed timestamp: " + controlTimestamp + ", state: " + controlState);
-                    }
+            // Yksi globaali läpijuoksu: päivitetään jokaisen kanavan tila viimeisimmän menneen timestampin mukaan
+            for (let i = 0; i < schedule.length; i++) {
+                let row = schedule[i];
+                let ts = parseInt(row[0]);
+                if (isNaN(ts) || ts >= currentUnixTime) {
+                    continue;
                 }
 
-                updateVirtualState(switchId, controlState);
-                channelLastControlTimeStamps[switchId] = controlTimestamp;
+                let ch = parseInt(row[1]);
+                let state = parseInt(row[2]);
+                if (isNaN(ch) || ch <= 0) {
+                    continue;
+                }
+
+                let switchId = ch - 1;
+                if (ts >= baseTimestamp[switchId]) {
+                    baseState[switchId] = state;
+                    baseTimestamp[switchId] = ts;
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": passed timestamp: " + ts + ", state: " + state);
+                }
+            }
+
+            // Päivitetään virtuaalitilat yhden kerran per kanava
+            for (let ch = 1; ch <= deviceChannels; ch++) {
+                let switchId = ch - 1;
+                updateVirtualState(switchId, baseState[switchId]);
+                channelLastControlTimeStamps[switchId] = baseTimestamp[switchId];
             }
 
             controlsInitialized = true;
@@ -466,12 +486,23 @@ function DoControlsCallback(value) {
         }
     }
     
-    // Jos jo alustettu, luetaan joko channel_data.updated tai schedule
+    // Jos jo alustettu, luetaan joko channel_data.updated tai schedule globaalilla läpijuoksulla
     (CONFIG.logLevel <= LOG.INFO) && console.log("Reading schedule or updated state from channel_data...");
 	try {
+        let lastTsPerChannel = [];
+        let newTsPerChannel = [];
+        let newStatePerChannel = [];
+        let useChannelDataOverride = [];
+
+        // Esilue kanavakohtaiset viimeiset ohjaustimestampit ja mahdolliset channel_data-päivitykset
         for (let ch = 1; ch <= deviceChannels; ch++) {
             let switchId = ch - 1;
             let lastTs = parseInt(channelLastControlTimeStamps[switchId] || 0);
+            lastTsPerChannel[switchId] = lastTs;
+            newTsPerChannel[switchId] = lastTs;
+            newStatePerChannel[switchId] = null;
+            useChannelDataOverride[switchId] = false;
+
             let updatedTs = 0;
             let currentStateFromChannelData = null;
 
@@ -488,30 +519,53 @@ function DoControlsCallback(value) {
 
             if (updatedTs > lastTs && currentStateFromChannelData !== null) {
                 // Kanavan asetuksia / tilaa päivitetty JSONissa viime ohjauksen jälkeen -> siirrytään suoraan sen tilaan
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": settings updated since the last control timestamp. Switching to the current state from channel_data.");
-                let controlState = currentStateFromChannelData;
-                let controlTimestamp = currentUnixTime;
-                updateVirtualState(switchId, controlState);
-                channelLastControlTimeStamps[switchId] = controlTimestamp;
+                useChannelDataOverride[switchId] = true;
+                newStatePerChannel[switchId] = currentStateFromChannelData;
+                newTsPerChannel[switchId] = currentUnixTime;
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": will switch directly to channel_data state " + currentStateFromChannelData + " at ts " + currentUnixTime);
+            }
+        }
+
+        // Käydään koko schedule kerran läpi ja etsitään mahdolliset uudet ohjaukset kanaville, joille EI ole channel_data-overridea
+        for (let i = 0; i < schedule.length; i++) {
+            let row = schedule[i];
+            let ts = parseInt(row[0]);
+            if (isNaN(ts) || ts > currentUnixTime) {
+                continue;
+            }
+
+            let ch = parseInt(row[1]);
+            let state = parseInt(row[2]);
+            if (isNaN(ch) || ch <= 0) {
+                continue;
+            }
+
+            let switchId = ch - 1;
+            if (useChannelDataOverride[switchId]) {
+                continue;
+            }
+
+            let lastTs = lastTsPerChannel[switchId];
+            if (ts > lastTs && ts >= newTsPerChannel[switchId]) {
+                newTsPerChannel[switchId] = ts;
+                newStatePerChannel[switchId] = state;
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": candidate passed timestamp: " + ts + ", state: " + state);
+            }
+        }
+
+        // Päivitä virtuaalitilat niille kanaville, joille löytyi uusi tila (channel_data override tai schedule)
+        for (let ch = 1; ch <= deviceChannels; ch++) {
+            let switchId = ch - 1;
+            let newTs = newTsPerChannel[switchId];
+            let lastTs = lastTsPerChannel[switchId];
+            let state = newStatePerChannel[switchId];
+
+            if (state !== null && newTs > lastTs) {
+                updateVirtualState(switchId, state);
+                channelLastControlTimeStamps[switchId] = newTs;
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": final control timestamp: " + newTs + ", state: " + state);
             } else {
-                // Ei config-päivitystä -> luetaan väliin jääneet aikataulurivit
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": settings not updated since the last control timestamp. Reading schedule for the passed timestamps.");
-
-                for (let i = 0; i < schedule.length; i++) {
-                    let row = schedule[i];
-                    let ts = parseInt(row[0]);
-                    let channel = parseInt(row[1]);
-                    let state = parseInt(row[2]);
-
-                    if (channel === ch && ts <= currentUnixTime && ts > lastTs) {
-                        let controlState = state;
-                        let controlTimestamp = ts;
-                        updateVirtualState(switchId, controlState);
-                        channelLastControlTimeStamps[switchId] = controlTimestamp;
-                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": passed timestamp: " + controlTimestamp + ", state: " + controlState);
-                    }
-                }
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": schedule read.");
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": no new control actions needed.");
             }
         }
 
