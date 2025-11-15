@@ -5,7 +5,7 @@ let CONFIG = {
     updatePeriod: 15000,
     apiEndpoint: "https://api.porssari.fi/getcontrols.php",
     returnTimestamps: 10,
-    jsonVersion: 2,
+    jsonVersion: 3,
     jsonChannelNames: false,
     logLevel: 0, // 0=debug, 1=info, 2=warn, 3=error
 };
@@ -23,6 +23,8 @@ let mainTimer;
 let channelLastControlTimeStamps = [];
 let relayStates = [];
 let taskQueue = [];
+let scheduleCache = null;
+let channelDataCache = null;
 
 // Logger
 const LOG = {
@@ -58,7 +60,7 @@ function InitCallback(result) {
         return;
     }
 
-    storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "KVS";
+    storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "None";
     
     // Program loop timer
     mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
@@ -116,7 +118,12 @@ function LoadSavedControldataCallback(result) {
 
 function SetStorageValue(baseKey, value) {
 
-    let chunkSize = (storageType === "ScriptStorage") ? 1000 : (storageType === "KVS" ? 230 : 0);
+    if (storageType !== "ScriptStorage") {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Local storage not supported for this firmware, skipping save for key " + baseKey);
+        return;
+    }
+
+    let chunkSize = 1000;
 
     (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saving data " + baseKey + " to " + storageType + " with chunk size: " + chunkSize);
 
@@ -140,45 +147,16 @@ function SetStorageValue(baseKey, value) {
     try {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Check for previous chunks count for key " + baseKey);
         
-        if (storageType === "KVS") {
-            enqueueTask("shellycall", "KVS.List", { "match": baseKey + "_*", "offset": 0 }, function (res, errCode, errMsg) {
+        let previousParts = 0;
 
-                let previousParts = 0;
-            
-                if (errCode !== 0) {
-                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Error fetching existing chunks from KVS for " + baseKey);
-                    SetStorageValueCallback(baseKey, chunks, parts, previousParts);
-                    return;
-                }
-
-                if (!res) {
-                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("No previous chunks found from KVS for key " + baseKey);
-                    SetStorageValueCallback(baseKey, chunks, parts, previousParts);
-                    return;
-                }
-            
-                previousParts = Object.keys(res.keys).length;
-                res = null;        
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Found " + previousParts + " chunks from KVS for key " + baseKey);     
-                SetStorageValueCallback(baseKey, chunks, parts, previousParts);
-            });
-        } else if (storageType === "ScriptStorage") {
-            
-            let previousParts = 0;
-
-            for (let i = 0; i < Script.storage.length; i++) {
-                const key = Script.storage.key(i);
-                if (key.indexOf(baseKey) === 0) {
-                    previousParts += 1;
-                }
+        for (let i = 0; i < Script.storage.length; i++) {
+            const key = Script.storage.key(i);
+            if (key.indexOf(baseKey) === 0) {
+                previousParts += 1;
             }
-            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Found " + previousParts + " chunks from ScriptStorage for key " + baseKey);
-            SetStorageValueCallback(baseKey, chunks, parts, previousParts);
-            return;
-        } else {
-            (CONFIG.logLevel <= LOG.ERROR) && console.log("Unknown storage type: " + storageType);
-            return;
         }
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Found " + previousParts + " chunks from ScriptStorage for key " + baseKey);
+        SetStorageValueCallback(baseKey, chunks, parts, previousParts);
     } catch (e) {
         (CONFIG.logLevel <= LOG.ERROR) && console.log("Error retrieving previous chunks for key " + baseKey + ": " + e);
         SetStorageValueCallback(baseKey, chunks, parts, 0);
@@ -186,16 +164,14 @@ function SetStorageValue(baseKey, value) {
 }
 
 function SetStorageValueCallback(baseKey, chunks, parts, previousParts) {
+    if (storageType !== "ScriptStorage") {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Local storage not supported for this firmware, skipping save for key " + baseKey);
+        return;
+    }
+
     for (let key in chunks) {
-        if (storageType === "KVS") {
-            enqueueTask("shellycall", "KVS.Set", { "key": key, "value": chunks[key] }, null);
-        } else if (storageType === "ScriptStorage") {
-            Script.storage.setItem(key, chunks[key]);
-            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved to ScriptStorage: " + key);
-        } else {
-            (CONFIG.logLevel <= LOG.ERROR) && console.log("Unknown storage type: " + storageType);
-            return;
-        }
+        Script.storage.setItem(key, chunks[key]);
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved to ScriptStorage: " + key);
         chunks[key] = null;
     }
     chunks = null;
@@ -204,108 +180,44 @@ function SetStorageValueCallback(baseKey, chunks, parts, previousParts) {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Removing " + (previousParts - parts) + " old chunks.");
         for (let i = parts; i < previousParts; i++) {
             let key = baseKey + "_" + i;
-            if (storageType === "KVS") {
-                enqueueTask("shellycall", "KVS.Delete", { "key": key }, function() {
-                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Deleted old chunk: " + key);
-                });
-            } else {
-                Script.storage.removeItem(key);
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Removed chunk: " + key + " from " + storageType);
-            }
+            Script.storage.removeItem(key);
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Removed chunk: " + key + " from ScriptStorage");
         }
     }
 }
 
 function GetStorageValue(baseKey, callback) {
-    if (storageType === "KVS") {
-        enqueueTask("shellycall", "KVS.GetMany", { "match": baseKey + "_?", "offset": 0 }, function(res, errCode, errMsg) {
-            handleKvsRetrieval(res, errCode, errMsg, baseKey, callback);            
-        });
-    } else {
-        let parts = 0;
-
-        for (let i = 0; i < Script.storage.length; i++) {
-            const key = Script.storage.key(i);
-            if (key.indexOf(baseKey) === 0) {
-                parts += 1;
-            }
-        }
-
-        let fullValue = "";
-
-        for (let i = 0; i < parts; i++) {
-            let keyToFind = baseKey + "_" + i;
-            for (let j = 0; j < Script.storage.length; j++) {
-                const key = Script.storage.key(j);
-                if (key === keyToFind) {
-                    fullValue += Script.storage.getItem(key);
-                    break;           
-                }  
-            }
-        }
-        callback(atob(fullValue));
-        callback = null;
-        fullValue = null;    
-    }
-}
-
-function handleKvsRetrieval(res, errCode, errMsg, baseKey, callback) {
-    if (errCode !== 0) {
-        (CONFIG.logLevel <= LOG.ERROR) && console.log("KVS.GetMany error with chunks for " + baseKey + ": " + errMsg);
+    if (storageType !== "ScriptStorage") {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Local storage not supported for this firmware, returning no data for key " + baseKey);
         callback(null);
-        callback = null;
         return;
     }
 
-    if (!res.items || res.items.length === 0) {
-        (CONFIG.logLevel <= LOG.DEBUG) && console.log("No stored chunks found for " + baseKey);
-        callback(null);
-        callback = null;
-        return;
+    let parts = 0;
+
+    for (let i = 0; i < Script.storage.length; i++) {
+        const key = Script.storage.key(i);
+        if (key.indexOf(baseKey) === 0) {
+            parts += 1;
+        }
     }
 
-    try {
-        let data = [];
-       
-        for (let key in res.items) {
-            if (res.items.hasOwnProperty(key) && res.items[key].value) {
-                data.push({ key: key, value: res.items[key].value });
+    let fullValue = "";
+
+    for (let i = 0; i < parts; i++) {
+        let keyToFind = baseKey + "_" + i;
+        for (let j = 0; j < Script.storage.length; j++) {
+            const key = Script.storage.key(j);
+            if (key === keyToFind) {
+                fullValue += Script.storage.getItem(key);
+                break;           
             }
         }
-
-        res = null;
-
-        let fullValue = "";
-
-        for (let i = 0; i < data.length; i++) {
-            let keyToFind = baseKey + "_" + i;
-            for (let j = 0; j < data.length; j++) {
-                let key = data[j].key;
-                if (!data[j].value || typeof data[j].value !== "string") {
-                    (CONFIG.logLevel <= LOG.ERROR) && console.log("Skipping invalid or missing value for key: " + key);
-                    continue;
-                }
-                if (key === keyToFind) {
-                    fullValue += data[j].value;
-                    data[j].value = null;
-                    break;
-                }
-            }
-        }
-
-        // Tarkistetaan, ettei fullValue ole tyhjä ennen Base64-dekoodausta
-        if (!fullValue || fullValue.length === 0) {
-            (CONFIG.logLevel <= LOG.ERROR) && console.log("Error: fullValue is empty, skipping atob()");
-            callback(null);
-            return;
-        }
-        callback(atob(fullValue));
-        callback = null;
-    } catch (e) {
-        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Error retrieving chunks for " + baseKey + ": " + e);
-        callback(null);
-        callback = null;
     }
+
+    callback(atob(fullValue));
+    callback = null;
+    fullValue = null;    
 }
 
 // Server request
@@ -346,11 +258,11 @@ function RequestControldataCallback(res, errCode, errMsg) {
             res = null; 
             
             let metadata = parsedBody.metadata;
-            let controls = parsedBody.controls;
+            // json_version=3: controls = [[timestamp, channel, state], ...]
+            // channel_states = [{ id, name, updated, state }, ...]
+            let schedule = parsedBody.controls;
+            let channelData = parsedBody.channel_states;
             parsedBody = null;
-
-            SetStorageValue('controls', controls);
-            controls = null;
 
             SetStorageValue('metadata', metadata);
             deviceChannels = parseInt(metadata.channels);
@@ -359,6 +271,51 @@ function RequestControldataCallback(res, errCode, errMsg) {
             jsonValidUntil = parseInt(metadata.valid_until);
             metadata = null;        
         
+            if (schedule && Array.isArray(schedule)) {
+                // Lajitellaan aikaleiman mukaan (vanhimmasta uusimpaan) ilman Array.sortia
+                schedule = sortFlatScheduleByTimestamp(schedule);
+                if (storageType === "ScriptStorage") {
+                    SetStorageValue('schedule', schedule);
+                    scheduleCache = null;
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Schedule stored to ScriptStorage, entries: " + schedule.length);
+                } else {
+                    scheduleCache = schedule;
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Schedule cached in memory, entries: " + scheduleCache.length);
+                }
+            } else {
+                if (storageType !== "ScriptStorage") {
+                    scheduleCache = null;
+                }
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("No schedule object found in JSON response.");
+            }
+            schedule = null;
+
+            if (channelData && typeof channelData === "object") {
+                // Muutetaan channel_states taulukko mapiksi, jossa key = (id-1)
+                let mappedChannelData = {};
+                for (let i = 0; i < channelData.length; i++) {
+                    let chEntry = channelData[i];
+                    if (!chEntry || chEntry.id === undefined) continue;
+
+                    let chId = parseInt(chEntry.id);
+                    if (isNaN(chId) || chId <= 0) continue;
+
+                    let switchId = chId - 1;
+                    mappedChannelData[switchId] = {
+                        state: chEntry.state !== undefined ? parseInt(chEntry.state) : 0,
+                        updated: chEntry.updated !== undefined ? parseInt(chEntry.updated) : 0,
+                        name: chEntry.name || ""
+                    };
+                }
+
+                channelDataCache = mappedChannelData;
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Channel data cache loaded.");
+            } else {
+                channelDataCache = null;
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("No channel_data object found in JSON response.");
+            }
+            channelData = null;
+
             controlsData = true;
 
             (CONFIG.logLevel <= LOG.DEBUG) && console.log("Controls JSON parsed.");
@@ -417,100 +374,155 @@ function CheckControlData() {
 function DoControls() {
     (CONFIG.logLevel <= LOG.INFO) && console.log("Updating virtual states for relays...");
     virtualStatesReady = false;
-    GetStorageValue('controls', DoControlsCallback);
+    // Luetaan aikataulu ScriptStoragesta, jos saatavilla. Jos ei, käytetään muistissa olevaa scheduleCachea.
+    if (storageType === "ScriptStorage") {
+        GetStorageValue('schedule', DoControlsCallback);
+    } else {
+        DoControlsCallback(null);
+    }
 }
 
 function DoControlsCallback(value) {
     currentUnixTime = Math.floor(Date.now() / 1000);
-    let controls = JSON.parse(value);
-    value = null;
-    
-    if (!controls || typeof controls !== "object") {
-        (CONFIG.logLevel <= LOG.ERROR) && console.log("Invalid JSON structure, virtual states not updated.");
+    let schedule = null;
+
+    // Valitaan aikataulu:
+    // - jos ScriptStorage käytössä: luetaan yksinomaan ScriptStoragesta (value)
+    // - jos ScriptStorage ei käytössä: käytetään vain muistissa olevaa scheduleCachea
+    try {
+        if (storageType === "ScriptStorage") {
+            if (value) {
+                schedule = JSON.parse(value);
+                value = null;
+            }
+        } else {
+            if (scheduleCache && Array.isArray(scheduleCache)) {
+                schedule = scheduleCache;
+            }
+        }
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error parsing schedule JSON: " + e);
+        virtualStatesReady = true;
         return;
     }
-    
-    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Found controls data, updating virtual states...");
-    let channelKeys = Object.keys(controls);
-    if (!channelKeys || channelKeys.length == 0) {
-        (CONFIG.logLevel <= LOG.ERROR) && console.log("Could not find any controlled channels from controls data.");
-        controls = null;
+
+    if (!schedule || !Array.isArray(schedule) || schedule.length === 0) {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("No valid schedule found, virtual states not updated.");
+        schedule = null;
+        virtualStatesReady = true;
         return;
     }
-    
-    // Initialize Shelly to current state
+
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Found schedule data, updating virtual states...");
+
+    // Initialize Shelly to current state using flat schedule [timestamp, channel, state]
     if (!controlsInitialized) {
         (CONFIG.logLevel <= LOG.INFO) && console.log("Script has started, initializing virtual states...");
         try {
-            for (let channelEntry in channelKeys) {
-                let switchId = parseInt(controls[channelEntry].id - 1);
-                let controlState = parseInt(controls[channelEntry].state);
-                let controlTimestamp = lastRequest;
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": initializing...");
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": initial JSON state: " + controlState);
-                
-                // Järjestetään aikataulut aikajärjestykseen (vanhimmasta uusimpaan)
-                let scheduleKeys = Object.keys(controls[channelEntry].schedules);
-                scheduleKeys = selectionSortSchedule(scheduleKeys, controls[channelEntry].schedules);
-                
-                for (let scheduleEntry in scheduleKeys) {
-                    if (controls[channelEntry].schedules[scheduleEntry].timestamp < currentUnixTime) {
-                        controlState = parseInt(controls[channelEntry].schedules[scheduleEntry].state);
-                        controlTimestamp = parseInt(controls[channelEntry].schedules[scheduleEntry].timestamp);
-                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": passed timestamp: " + controlTimestamp + ", state: " + controlState);
+            for (let ch = 1; ch <= deviceChannels; ch++) {
+                let switchId = ch - 1;
+
+                // Peruslähtötila channelDataCachen mukaan, jos olemassa
+                let controlState = 0;
+                let controlTimestamp = lastRequest || 0;
+
+                if (channelDataCache && channelDataCache[switchId]) {
+                    if (channelDataCache[switchId].state !== undefined) {
+                        controlState = parseInt(channelDataCache[switchId].state);
                     }
                 }
-                
+
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": initializing, base state from channel_data: " + controlState);
+
+                // Käydään läpi kaikki menneet aikataulurivit kyseiselle kanavalle
+                for (let i = 0; i < schedule.length; i++) {
+                    let row = schedule[i];
+                    let ts = parseInt(row[0]);
+                    let channel = parseInt(row[1]);
+                    let state = parseInt(row[2]);
+
+                    if (channel === ch && ts < currentUnixTime) {
+                        controlState = state;
+                        controlTimestamp = ts;
+                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": passed timestamp: " + controlTimestamp + ", state: " + controlState);
+                    }
+                }
+
                 updateVirtualState(switchId, controlState);
-                channelLastControlTimeStamps[switchId] = controlTimestamp;	
+                channelLastControlTimeStamps[switchId] = controlTimestamp;
             }
-            controls = null;
+
             controlsInitialized = true;
+            schedule = null;
             virtualStatesReady = true;
             (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual states initialized.");
             return;
         } catch (e) {
-            controls = null;
             controlsInitialized = false;
+            schedule = null;
             virtualStatesReady = true;
-            (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while initializing virtual states: " + e);
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while initializing virtual states from schedule: " + e);
             return;
         }
     }
     
-    // If initialized, read control state from schedule
-    (CONFIG.logLevel <= LOG.INFO) && console.log("Reading schedule or updated state...");
+    // Jos jo alustettu, luetaan joko channel_data.updated tai schedule
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Reading schedule or updated state from channel_data...");
 	try {
-        for (let channelEntry in channelKeys) {
-            let switchId =  parseInt(controls[channelEntry].id - 1);
-            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": settings updated: " + controls[channelEntry].updated + ", last controlled timestamp:" + channelLastControlTimeStamps[switchId]);
-            if (parseInt(controls[channelEntry].updated) > parseInt(channelLastControlTimeStamps[switchId])) {
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + parseInt(controls[channelEntry].id) + ": settings updated since the last control timestamp. Switching to the current state.");
-                let controlState = parseInt(controls[channelEntry].state);
+        for (let ch = 1; ch <= deviceChannels; ch++) {
+            let switchId = ch - 1;
+            let lastTs = parseInt(channelLastControlTimeStamps[switchId] || 0);
+            let updatedTs = 0;
+            let currentStateFromChannelData = null;
+
+            if (channelDataCache && channelDataCache[switchId]) {
+                if (channelDataCache[switchId].updated !== undefined) {
+                    updatedTs = parseInt(channelDataCache[switchId].updated);
+                }
+                if (channelDataCache[switchId].state !== undefined) {
+                    currentStateFromChannelData = parseInt(channelDataCache[switchId].state);
+                }
+            }
+
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": channel_data updated: " + updatedTs + ", last controlled timestamp: " + lastTs);
+
+            if (updatedTs > lastTs && currentStateFromChannelData !== null) {
+                // Kanavan asetuksia / tilaa päivitetty JSONissa viime ohjauksen jälkeen -> siirrytään suoraan sen tilaan
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": settings updated since the last control timestamp. Switching to the current state from channel_data.");
+                let controlState = currentStateFromChannelData;
                 let controlTimestamp = currentUnixTime;
                 updateVirtualState(switchId, controlState);
                 channelLastControlTimeStamps[switchId] = controlTimestamp;
             } else {
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": settings not updated since the last control timestamp. Reading schedule for the passed timestamps.");
-                let scheduleKeys = Object.keys(controls[channelEntry].schedules);
-                for (let scheduleEntry in scheduleKeys) {
-                    if ((currentUnixTime >= controls[channelEntry].schedules[scheduleEntry].timestamp) && (controls[channelEntry].schedules[scheduleEntry].timestamp > channelLastControlTimeStamps[switchId])) {
-                        let controlState = parseInt(controls[channelEntry].schedules[scheduleEntry].state);
-                        let controlTimestamp = parseInt(controls[channelEntry].schedules[scheduleEntry].timestamp);
+                // Ei config-päivitystä -> luetaan väliin jääneet aikataulurivit
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": settings not updated since the last control timestamp. Reading schedule for the passed timestamps.");
+
+                for (let i = 0; i < schedule.length; i++) {
+                    let row = schedule[i];
+                    let ts = parseInt(row[0]);
+                    let channel = parseInt(row[1]);
+                    let state = parseInt(row[2]);
+
+                    if (channel === ch && ts <= currentUnixTime && ts > lastTs) {
+                        let controlState = state;
+                        let controlTimestamp = ts;
                         updateVirtualState(switchId, controlState);
                         channelLastControlTimeStamps[switchId] = controlTimestamp;
-                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + controls[channelEntry].id + ": passed timestamp: " + controlTimestamp + ", state: " + controlState);
+                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": passed timestamp: " + controlTimestamp + ", state: " + controlState);
                     }
                 }
-                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + parseInt(controls[channelEntry].id) + ": schedule read.");
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + ch + ": schedule read.");
             }
         }
-        controls = null;
+
         (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual states updated.");
     } catch (e) {
-        controls = null;
-        (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual states not updated due to unknown error: " + e);
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual states not updated due to unknown error while reading schedule: " + e);
     }
+    // channelDataCachea tarvitaan vain ensimmäisen päivityssyklin jälkeen uuden JSON-haun jälkeen,
+    // joten se voidaan nollata tämän funktion lopussa, jotta muistia vapautuu.
+    channelDataCache = null;
+    schedule = null;
     virtualStatesReady = true;
 }
 
@@ -664,22 +676,24 @@ function handleTaskQueueDelay(task) {
     }
 }
 
-// Sort schedule for initialization
-function selectionSortSchedule(keys, schedules) {
-    let n = keys.length;
+// Lajitellaan flat schedule-taulukko [timestamp, channel, state] aikaleiman mukaan (selection sort)
+function sortFlatScheduleByTimestamp(schedule) {
+    let n = schedule.length;
     for (let i = 0; i < n - 1; i++) {
         let minIndex = i;
         for (let j = i + 1; j < n; j++) {
-            if (schedules[keys[j]].timestamp < schedules[keys[minIndex]].timestamp) {
+            if (parseInt(schedule[j][0]) < parseInt(schedule[minIndex][0])) {
                 minIndex = j;
             }
         }
-        
-        let temp = keys[i];
-        keys[i] = keys[minIndex];
-        keys[minIndex] = temp;
+
+        if (minIndex !== i) {
+            let tmp = schedule[i];
+            schedule[i] = schedule[minIndex];
+            schedule[minIndex] = tmp;
+        }
     }
-    return keys;
+    return schedule;
 }
 
 // Failsafe logic
