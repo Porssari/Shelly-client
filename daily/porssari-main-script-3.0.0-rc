@@ -4,6 +4,7 @@ let VERSION = "Shelly-3.0.0-rc1";
 let CONFIG = {
     updatePeriod: 15000,
     apiEndpoint: "https://api.porssari.fi/getcontrols.php",
+    registrationApiEndpoint: "https://api.porssari.fi/device_registration.php",
     returnTimestamps: 10,
     jsonVersion: 3,
     jsonChannelNames: false,
@@ -25,6 +26,29 @@ let relayStates = [];
 let taskQueue = [];
 let scheduleCache = null;
 let channelDataCache = null;
+
+// Virtuaaliaikaa varten (offline-toiminta uptimeen perustuen)
+let virtualTime = 0;
+let timeIsTrusted = false;
+let lastUptime = null;
+let lastVirtualTimeSave = 0;
+
+// EV-latausaseman virtuaalikomponenttia varten
+let evVirtualChannelId = 201;
+let evVirtualSwitchId = null;
+let evVirtualState = null;
+let evVirtualName = null;
+
+// Pörssäri-rekisteröintiä varten
+let estateId = null;
+let porssariRegistrationChecked = false;
+let porssariRegistrationPending = false;
+let porssariCredentialsComponentsCreated = false;
+let estateIdEventHandler = null;
+let estateIdRequestHandler = null;
+let porssariUsernameHandle = null;
+let porssariSecretHandle = null;
+let porssariCredentialsStatusHandler = null;
 
 // Logger
 const LOG = {
@@ -61,6 +85,9 @@ function InitCallback(result) {
     }
 
     storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "None";
+
+    // Käynnistetään Pörssäri-rekisteröinnin tarkistus rinnalla
+    InitPorssariRegistration();
     
     // Program loop timer
     mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
@@ -73,8 +100,8 @@ function InitCallback(result) {
     (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling startup function in 1 seconds: Load controls data from storage.");
     Timer.set(1000, false, LoadSavedControldata);
     
-    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling startup function in 5 seconds: Request controls data from server.");
-    Timer.set(5000, false, RequestControldata);
+    // Ohjausdatan pollaus aloitetaan vasta kun estateId on saatavilla (joko rekisteröintirajapinnasta tai LAN-eventistä)
+    // Ei kutsuta RequestControldata() tässä vaiheessa
 }
 
 // Local data functions
@@ -111,6 +138,9 @@ function LoadSavedControldataCallback(result) {
         controlsData = true;
         controlsReady = true;
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Controlled channels: " + deviceChannels + ", valid until: " + jsonValidUntil + ", api endpoint: " + CONFIG.apiEndpoint);
+
+        // Yritetään ladata virtuaaliaika ScriptStoragesta, jos se on talletettu aiemmin
+        LoadVirtualTimeFromStorage();
     } catch (e) {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved control data not found from local storage: " + e);
     }
@@ -220,8 +250,656 @@ function GetStorageValue(baseKey, callback) {
     fullValue = null;    
 }
 
+// Pörssäri-rekisteröintilogiikka
+function InitPorssariRegistration() {
+    if (porssariRegistrationChecked) {
+        return;
+    }
+
+    porssariRegistrationChecked = true;
+
+    // Jos rekisteröintirajapintaa ei ole määritelty, ei tehdä mitään
+    if (!CONFIG.registrationApiEndpoint || CONFIG.registrationApiEndpoint.length === 0) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri registration endpoint not configured, skipping registration check.");
+        return;
+    }
+
+    // Tarkistetaan löytyykö laite Pörssäri-palvelusta
+    CheckDeviceRegistrationInPorssari();
+}
+
+function CheckDeviceRegistrationInPorssari() {
+    try {
+        let urlToCall = CONFIG.registrationApiEndpoint;
+
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Checking Pörssäri registration status...");
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Registration URL: " + urlToCall);
+
+        // Lähetetään POST-pyyntö, jossa on deviceId ja Shellyn perustiedot
+        let postBody = JSON.stringify({
+            deviceId: shellyMac,
+            model: shellyApp,
+            firmwareVersion: shellyFwVer,
+            scriptVersion: VERSION
+        });
+
+        enqueueTask("shellycall", "HTTP.POST", { 
+            "url": urlToCall, 
+            "timeout": 10, 
+            "ssl_ca": "*",
+            "headers": { "Content-Type": "application/json" },
+            "body": postBody
+        }, CheckDeviceRegistrationInPorssariCallback);
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while checking Pörssäri registration status: " + e);
+    }
+}
+
+function CheckDeviceRegistrationInPorssariCallback(res, errCode, errMsg) {
+    if (errCode !== 0 || !res) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri registration check failed: " + errCode + " / " + errMsg);
+        return;
+    }
+
+    try {
+        if (res.code !== 200) {
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri registration status HTTP code: " + res.code);
+            return;
+        }
+
+        let body = JSON.parse(res.body);
+        res = null;
+
+        // Odotettu muoto:
+        // { found: 1, building_id: "ABC123" } tai { found: 0 }
+        if (!body || typeof body !== "object") {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Invalid Pörssäri registration JSON.");
+            return;
+        }
+
+        let found = body.found !== undefined ? parseInt(body.found) : 0;
+        if (found === 1 && body.building_id) {
+            estateId = "" + body.building_id;
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: device already registered to estateId " + estateId + ".");
+
+            // Rekisteröidään vastaajaksi estateId-kyselyihin ja emittoidaan tieto kerran
+            StartEstateIdResponder();
+            EmitPorssariBuildingIdToLan();
+
+            // Nyt kun estateId on saatavilla, voidaan aloittaa varsinaisen ohjausrajapinnan pollaus
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: estateId available, starting control data polling.");
+            controlsReady = false;
+            RequestControldata();
+        } else {
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: device not registered, waiting for building id from LAN or user.");
+
+            // Aloitetaan kuuntelemaan sisäverkosta kiinteistö-id:tä
+            StartListeningPorssariBuildingIdFromLan();
+        }
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while parsing Pörssäri registration status: " + e);
+    }
+}
+
+// HUOM: seuraavat LAN-funktiot ovat tällä hetkellä vain runkoja.
+// Varsinainen LAN-broadcast / -kuuntelu pitää toteuttaa käytetyn tekniikan mukaan (esim. UDP, MQTT tms.).
+
+function EmitPorssariBuildingIdToLan() {
+    if (!estateId) {
+        return;
+    }
+
+    if (typeof Shelly === "undefined" || typeof Shelly.emitEvent !== "function") {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri: Shelly.emitEvent not available, cannot emit estateId.");
+        return;
+    }
+
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: emitting estateId " + estateId + " via Shelly event.");
+
+    // Lähetetään tapahtuma, jonka kaikki pysyvät RPC-kanavat voivat kuunnella.
+    // Esimerkiksi toinen Shelly voi reitittää tämän edelleen tai keskitetty integraatio voi välittää tiedon.
+    try {
+        Shelly.emitEvent("porssari_estate_id", {
+            estateId: estateId,
+            device_mac: shellyMac
+        });
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: exception while emitting estateId event: " + e);
+    }
+}
+
+function StartListeningPorssariBuildingIdFromLan() {
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: listening for estateId events via Shelly.addEventHandler().");
+
+    if (estateId) {
+        // Jos estateId on jo tiedossa, ei tarvitse kuunnella
+        return;
+    }
+
+    if (typeof Shelly === "undefined" || typeof Shelly.addEventHandler !== "function") {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri: Shelly.addEventHandler not available, cannot listen for estateId events.");
+    } else {
+        // Rekisteröidään event handler, joka reagoi porssari_estate_id -tapahtumiin
+        estateIdEventHandler = Shelly.addEventHandler(function (ev, userdata) {
+            try {
+                if (!ev || !ev.event || ev.event !== "porssari_estate_id") {
+                    return;
+                }
+                if (!ev.data || typeof ev.data.estateId === "undefined") {
+                    return;
+                }
+
+                if (!estateId) {
+                    OnPorssariBuildingIdReceived(ev.data.estateId);
+                }
+            } catch (e) {
+                (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error in estateId event handler: " + e);
+            }
+        });
+
+        // Lähetetään pyyntö estateId:n saamiseksi muilta laitteilta
+        if (typeof Shelly.emitEvent === "function") {
+            try {
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: emitting estateId request event.");
+                Shelly.emitEvent("porssari_estate_id_request", {
+                    device_mac: shellyMac
+                });
+            } catch (e) {
+                (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error while emitting estateId request event: " + e);
+            }
+        }
+    }
+
+    // Jos estateId:tä ei saada tapahtumana 5 sekunnin kuluessa,
+    // luodaan virtuaalikomponentit käyttäjätunnuksen ja salaisen avaimen syöttämistä varten.
+    Timer.set(5000, false, function () {
+        if (!estateId && !porssariCredentialsComponentsCreated) {
+            CreatePorssariCredentialsVirtualComponents();
+        }
+    });
+}
+
+function OnPorssariBuildingIdReceived(buildingId) {
+    if (!buildingId) {
+        return;
+    }
+
+    estateId = "" + buildingId;
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: estateId received from LAN: " + estateId + ". Registering device for adoption.");
+
+    // Poistetaan kuuntelu estateId:n saamiseksi, koska se on nyt saatavilla
+    CleanupEstateIdListener();
+
+    // Kun estateId on saatu, rekisteröidään vastaajaksi tuleviin pyyntöihin
+    StartEstateIdResponder();
+
+    RegisterDeviceForAdoptionInPorssari();
+
+    // Nyt kun estateId on saatavilla, voidaan aloittaa varsinaisen ohjausrajapinnan pollaus
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: estateId available, starting control data polling.");
+    controlsReady = false;
+    RequestControldata();
+}
+
+// Laite, jolla on estateId, vastaa estateId-pyyntöihin
+function StartEstateIdResponder() {
+    if (!estateId) {
+        return;
+    }
+
+    if (typeof Shelly === "undefined" || typeof Shelly.addEventHandler !== "function" || typeof Shelly.emitEvent !== "function") {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri: cannot start estateId responder, Shelly event API not available.");
+        return;
+    }
+
+    if (estateIdRequestHandler) {
+        // Jo rekisteröity
+        return;
+    }
+
+    estateIdRequestHandler = Shelly.addEventHandler(function (ev, userdata) {
+        try {
+            if (!ev || !ev.event || ev.event !== "porssari_estate_id_request") {
+                return;
+            }
+
+            // Ei vastata omaan pyyntöön (jos MAC sama)
+            if (ev.data && ev.data.device_mac && ev.data.device_mac === shellyMac) {
+                return;
+            }
+
+            // Vastataan estateId:llä
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri: answering estateId request with estateId " + estateId + ".");
+            EmitPorssariBuildingIdToLan();
+        } catch (e) {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error in estateId request handler: " + e);
+        }
+    });
+}
+
+function RegisterDeviceForAdoptionInPorssari() {
+    if (!estateId) {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri: cannot register device for adoption, estateId missing.");
+        return;
+    }
+
+    if (porssariRegistrationPending) {
+        return;
+    }
+    porssariRegistrationPending = true;
+
+    try {
+        let urlToCall = CONFIG.registrationApiEndpoint;
+
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: registering device for adoption, estateId " + estateId + "...");
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri registration URL: " + urlToCall);
+
+        // Lähetetään POST-pyyntö, jossa on deviceId, estateId ja Shellyn perustiedot
+        let postBody = JSON.stringify({
+            deviceId: shellyMac,
+            estateId: estateId,
+            model: shellyApp,
+            firmwareVersion: shellyFwVer,
+            scriptVersion: VERSION
+        });
+
+        enqueueTask("shellycall", "HTTP.POST", { 
+            "url": urlToCall, 
+            "timeout": 10, 
+            "ssl_ca": "*",
+            "headers": { "Content-Type": "application/json" },
+            "body": postBody
+        }, RegisterDeviceForAdoptionInPorssariCallback);
+    } catch (e) {
+        porssariRegistrationPending = false;
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while registering device for adoption in Pörssäri: " + e);
+    }
+}
+
+function RegisterDeviceForAdoptionInPorssariCallback(res, errCode, errMsg) {
+    porssariRegistrationPending = false;
+
+    if (errCode !== 0 || !res) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri adoption registration failed: " + errCode + " / " + errMsg);
+        return;
+    }
+
+    try {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri adoption registration response code: " + res.code);
+        
+        // Jos rekisteröinti onnistui, poistetaan virtuaalikomponentit jos ne on luotu
+        if (res.code === 200 && estateId) {
+            CleanupPorssariCredentialsComponents();
+        }
+        // Myöhemmin tähän voidaan lisätä tarkempi JSON-tulkinta, kun rajapinta on olemassa
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while handling Pörssäri adoption registration response: " + e);
+    }
+}
+
+// Virtuaalikomponentit Pörssäri-käyttäjätunnusta ja salaista avainta varten
+function CreatePorssariCredentialsVirtualComponents() {
+    if (porssariCredentialsComponentsCreated) {
+        return;
+    }
+
+    // Jos laite on jo liitetty kiinteistöön, ei tarvita cred-komponentteja
+    if (estateId) {
+        return;
+    }
+
+    if (typeof Virtual === "undefined" || typeof Virtual.Add !== "function" || typeof Virtual.getHandle !== "function") {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri: Virtual component API not available, cannot create credentials components.");
+        return;
+    }
+
+    try {
+        // Käytetään tekstityyppisiä virtuaalikomponentteja ID-alueelta 200–299
+        //  - porssari_username: text:210
+        //  - porssari_secret:   text:211
+
+        let usernameResult = Virtual.Add({
+            type: "text",
+            config: { name: "porssari_username" },
+            id: 210
+        });
+
+        let secretResult = Virtual.Add({
+            type: "text",
+            config: { name: "porssari_secret" },
+            id: 211
+        });
+
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: virtual components for username and secret created (text:210, text:211).");
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri: usernameResult=" + JSON.stringify(usernameResult) + ", secretResult=" + JSON.stringify(secretResult));
+
+        // Haetaan handle:t virtuaalikomponenteille, jotta voidaan lukea niiden arvot
+        try {
+            porssariUsernameHandle = Virtual.getHandle("text:210");
+            porssariSecretHandle = Virtual.getHandle("text:211");
+        } catch (e) {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error getting virtual component handles: " + e);
+        }
+
+        // Rekisteröidään status handler, joka kuuntelee virtuaalikomponenttien muutoksia
+        StartListeningPorssariCredentialsChanges();
+
+        porssariCredentialsComponentsCreated = true;
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error while creating credentials virtual components: " + e);
+    }
+}
+
+// Kuunnellaan virtuaalikomponenttien muutoksia (käyttäjätunnus ja passcode)
+function StartListeningPorssariCredentialsChanges() {
+    if (porssariCredentialsStatusHandler) {
+        // Jo rekisteröity
+        return;
+    }
+
+    if (typeof Shelly === "undefined" || typeof Shelly.addStatusHandler !== "function") {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri: Shelly.addStatusHandler not available, cannot listen for credential changes.");
+        return;
+    }
+
+    porssariCredentialsStatusHandler = Shelly.addStatusHandler(function (status, userdata) {
+        try {
+            // Tarkistetaan onko virtuaalikomponenttien tila muuttunut
+            if (!status || !status.virtual || !status.virtual.text) {
+                return;
+            }
+
+            // Tarkistetaan onko molemmat kentät täytetty
+            let username = null;
+            let passcode = null;
+
+            if (status.virtual.text[210] && status.virtual.text[210].value) {
+                username = status.virtual.text[210].value;
+            }
+            if (status.virtual.text[211] && status.virtual.text[211].value) {
+                passcode = status.virtual.text[211].value;
+            }
+
+            // Jos molemmat kentät on täytetty ja laite ei ole vielä rekisteröity, lähetetään rekisteröintipyyntö
+            if (username && passcode && !estateId && !porssariRegistrationPending) {
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: credentials filled, registering device with username and passcode.");
+                RegisterDeviceWithCredentialsInPorssari(username, passcode);
+            }
+        } catch (e) {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error in credentials status handler: " + e);
+        }
+    });
+}
+
+// Rekisteröidään laite käyttäjätunnuksen ja passcode:n avulla
+function RegisterDeviceWithCredentialsInPorssari(username, passcode) {
+    if (!username || !passcode) {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri: cannot register device, username or passcode missing.");
+        return;
+    }
+
+    if (porssariRegistrationPending) {
+        return;
+    }
+    porssariRegistrationPending = true;
+
+    try {
+        let urlToCall = CONFIG.registrationApiEndpoint;
+
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: registering device with credentials...");
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri registration URL: " + urlToCall);
+
+        // Lähetetään POST-pyyntö, jossa on deviceId, username, passcode ja Shellyn perustiedot
+        let postBody = JSON.stringify({
+            deviceId: shellyMac,
+            username: username,
+            passcode: passcode,
+            model: shellyApp,
+            firmwareVersion: shellyFwVer,
+            scriptVersion: VERSION
+        });
+
+        enqueueTask("shellycall", "HTTP.POST", { 
+            "url": urlToCall, 
+            "timeout": 10, 
+            "ssl_ca": "*",
+            "headers": { "Content-Type": "application/json" },
+            "body": postBody
+        }, RegisterDeviceWithCredentialsCallback);
+    } catch (e) {
+        porssariRegistrationPending = false;
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while registering device with credentials in Pörssäri: " + e);
+    }
+}
+
+function RegisterDeviceWithCredentialsCallback(res, errCode, errMsg) {
+    porssariRegistrationPending = false;
+
+    if (errCode !== 0 || !res) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri credentials registration failed: " + errCode + " / " + errMsg);
+        return;
+    }
+
+    try {
+        if (res.code === 200) {
+            let body = JSON.parse(res.body);
+            res = null;
+
+            // Odotettu muoto: { estateId: "ABC123" } tai vastaava
+            if (body && body.estateId) {
+                estateId = "" + body.estateId;
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: device registered successfully, estateId: " + estateId + ".");
+
+                // Poistetaan turhat listenerit ja virtuaalikomponentit, koska rekisteröinti onnistui
+                CleanupEstateIdListener();
+                CleanupPorssariCredentialsComponents();
+
+                // Rekisteröidään vastaajaksi estateId-kyselyihin
+                StartEstateIdResponder();
+                EmitPorssariBuildingIdToLan();
+
+                // Nyt kun estateId on saatavilla, voidaan aloittaa varsinaisen ohjausrajapinnan pollaus
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: estateId available, starting control data polling.");
+                controlsReady = false;
+                RequestControldata();
+            } else {
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri credentials registration response code: " + res.code);
+            }
+        } else {
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri credentials registration response code: " + res.code);
+        }
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while handling Pörssäri credentials registration response: " + e);
+    }
+}
+
+// Poistetaan estateId:n kuuntelu, koska se on nyt saatavilla
+function CleanupEstateIdListener() {
+    if (estateIdEventHandler && typeof Shelly !== "undefined" && typeof Shelly.removeEventHandler === "function") {
+        try {
+            Shelly.removeEventHandler(estateIdEventHandler);
+            estateIdEventHandler = null;
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri: estateId event listener removed.");
+        } catch (e) {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error removing estateId event listener: " + e);
+        }
+    }
+}
+
+// Poistetaan virtuaalikomponentit ja credentials status handler, koska rekisteröinti onnistui
+function CleanupPorssariCredentialsComponents() {
+    // Poistetaan credentials status handler
+    if (porssariCredentialsStatusHandler && typeof Shelly !== "undefined" && typeof Shelly.removeStatusHandler === "function") {
+        try {
+            Shelly.removeStatusHandler(porssariCredentialsStatusHandler);
+            porssariCredentialsStatusHandler = null;
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri: credentials status handler removed.");
+        } catch (e) {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error removing credentials status handler: " + e);
+        }
+    }
+
+    // Poistetaan virtuaalikomponentit jos ne on luotu
+    if (porssariCredentialsComponentsCreated && typeof Shelly !== "undefined" && typeof Shelly.removeComponent === "function") {
+        try {
+            // Poistetaan username-komponentti (text:210)
+            Shelly.removeComponent("text:210");
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: virtual component text:210 (username) removed.");
+        } catch (e) {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri: error removing username component (may not exist): " + e);
+        }
+
+        try {
+            // Poistetaan secret-komponentti (text:211)
+            Shelly.removeComponent("text:211");
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: virtual component text:211 (secret) removed.");
+        } catch (e) {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri: error removing secret component (may not exist): " + e);
+        }
+
+        porssariCredentialsComponentsCreated = false;
+        porssariUsernameHandle = null;
+        porssariSecretHandle = null;
+    }
+}
+
+// Virtuaaliajan tallennus ja lataus ScriptStoragesta
+function SaveVirtualTimeToStorage() {
+    if (storageType !== "ScriptStorage") {
+        return;
+    }
+
+    if (!timeIsTrusted || !virtualTime || virtualTime <= 0) {
+        return;
+    }
+
+    let payload = {
+        virtual_time: virtualTime
+    };
+
+    if (jsonValidUntil) {
+        payload.json_valid_until = jsonValidUntil;
+    }
+    if (lastRequest) {
+        payload.last_request = lastRequest;
+    }
+
+    try {
+        SetStorageValue('virtualtime', payload);
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Virtual time saved to storage: " + virtualTime);
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while saving virtual time to storage: " + e);
+    }
+}
+
+function LoadVirtualTimeFromStorage() {
+    if (storageType !== "ScriptStorage") {
+        return;
+    }
+
+    try {
+        GetStorageValue('virtualtime', function (result) {
+            if (!result) {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("No virtual time found in storage.");
+                return;
+            }
+
+            try {
+                let data = JSON.parse(result);
+                result = null;
+
+                if (data && typeof data === "object" && data.virtual_time !== undefined) {
+                    let vt = parseInt(data.virtual_time);
+                    if (!isNaN(vt) && vt > 0) {
+                        virtualTime = vt;
+                        timeIsTrusted = true;
+                        lastVirtualTimeSave = virtualTime;
+                        currentUnixTime = virtualTime;
+                        (CONFIG.logLevel <= LOG.INFO) && console.log("Virtual time loaded from storage: " + virtualTime);
+                    }
+                }
+            } catch (e) {
+                (CONFIG.logLevel <= LOG.ERROR) && console.log("Error parsing virtual time from storage: " + e);
+            }
+        });
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while loading virtual time from storage: " + e);
+    }
+}
+
+// Päivitetään virtuaaliaika Shellyn uptimen perusteella
+function UpdateVirtualTime() {
+    let uptime = null;
+
+    try {
+        if (typeof Shelly !== "undefined" && typeof Shelly.getComponentStatus === "function") {
+            // Gen2-laitteet: uptime saatavilla sys-komponentista
+            let sys = Shelly.getComponentStatus("sys", 0);
+            if (sys && typeof sys.uptime !== "undefined") {
+                uptime = parseInt(sys.uptime);
+            }
+        }
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Error while reading system uptime: " + e);
+    }
+
+    // Jos uptimen lukeminen ei onnistu, käytetään vararatkaisuna Date.now()-pohjaista aikaleimaa
+    if (uptime === null || isNaN(uptime) || uptime < 0) {
+        if (!timeIsTrusted || virtualTime <= 0) {
+            virtualTime = Math.floor(Date.now() / 1000);
+            timeIsTrusted = true;
+            currentUnixTime = virtualTime;
+        }
+        return;
+    }
+
+    if (lastUptime === null) {
+        // Ensimmäinen kerta tällä ajolla
+        lastUptime = uptime;
+        if (!timeIsTrusted || virtualTime <= 0) {
+            virtualTime = Math.floor(Date.now() / 1000);
+            timeIsTrusted = true;
+        }
+        currentUnixTime = virtualTime;
+        return;
+    }
+
+    let delta = uptime - lastUptime;
+    if (delta <= 0) {
+        lastUptime = uptime;
+        currentUnixTime = virtualTime;
+        return;
+    }
+
+    virtualTime += delta;
+    lastUptime = uptime;
+    currentUnixTime = virtualTime;
+}
+
+// Virtuaaliajan säännöllinen tallennus
+function MaybeSaveVirtualTime() {
+    if (!timeIsTrusted || !virtualTime || virtualTime <= 0) {
+        return;
+    }
+
+    // Tallennetaan korkeintaan noin kerran minuutissa
+    if (lastVirtualTimeSave === 0 || (virtualTime - lastVirtualTimeSave) >= 60) {
+        SaveVirtualTimeToStorage();
+        lastVirtualTimeSave = virtualTime;
+    }
+}
+
 // Server request
 function RequestControldata() {
+    // Vain rekisteröidyt laitteet (joilla on estateId) saavat ohjausdataa
+    if (!estateId) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Skipping control data request: device not registered (no estateId).");
+        controlsReady = true;
+        cyclesUntilRequest = 18 + Math.floor(3 * Math.random());
+        mainCycleCounter = 1;
+        return;
+    }
+
     try {
         (CONFIG.logLevel <= LOG.INFO) && console.log("Requesting control data from server...");
         let urlToCall = CONFIG.apiEndpoint + "?device_mac=" + shellyMac + "&last_request=" + (lastRequest || 0) + "&script_version=" + VERSION + "&client_model=" + shellyApp + "&client_fw=" + shellyFwVer + "&cut_schedule=" + CONFIG.returnTimestamps + "&json_version=" + CONFIG.jsonVersion + "&json_channel_names=" + CONFIG.jsonChannelNames;
@@ -270,6 +948,11 @@ function RequestControldataCallback(res, errCode, errMsg) {
             lastRequest = parseInt(metadata.timestamp);
             jsonValidUntil = parseInt(metadata.valid_until);
             metadata = null;        
+
+            // Päivitetään virtuaaliaika nykyiseen aikaan, koska NTP-aika on juuri varmennettu serveriltä
+            virtualTime = Math.floor(Date.now() / 1000);
+            timeIsTrusted = true;
+            currentUnixTime = virtualTime;
         
             if (schedule && Array.isArray(schedule)) {
                 // Lajitellaan aikaleiman mukaan (vanhimmasta uusimpaan) ilman Array.sortia
@@ -314,7 +997,13 @@ function RequestControldataCallback(res, errCode, errMsg) {
                 channelDataCache = null;
                 (CONFIG.logLevel <= LOG.DEBUG) && console.log("No channel_data object found in JSON response.");
             }
+
+            // Päivitetään sähköauton latausasemaa varten virtuaalinen switch-kanava (201)
+            HandleEvVirtualComponent(channelData);
             channelData = null;
+
+            // Talletetaan virtuaaliaika ScriptStorageen, jotta se voidaan palauttaa offline-tilanteessa
+            SaveVirtualTimeToStorage();
 
             controlsData = true;
 
@@ -326,6 +1015,15 @@ function RequestControldataCallback(res, errCode, errMsg) {
         } else if (res.code === 304) {
             requestInfo = "Controls data not updated after last request: " + res.code;
             res = null;
+
+            // 304 vastauksen yhteydessä voidaan luottaa siihen, että laite on onlinessa ja NTP-aika kunnossa,
+            // joten sidotaan virtuaaliaika nykyiseen kellonaikaan.
+            virtualTime = Math.floor(Date.now() / 1000);
+            timeIsTrusted = true;
+            currentUnixTime = virtualTime;
+
+            // Talletetaan ajantasainen virtuaaliaika ScriptStorageen
+            SaveVirtualTimeToStorage();
         } else {
             requestInfo = "Invalid server request. Code: " + res.code;
             res = null;
@@ -346,7 +1044,6 @@ function RequestControldataCallback(res, errCode, errMsg) {
 // Control data functions
 function CheckControlData() {
     (CONFIG.logLevel <= LOG.DEBUG) && console.log("Checking if control data is valid."); 
-    currentUnixTime = Math.floor(Date.now() / 1000);
     isFailsafe = false;
 
     if (controlsData && jsonValidUntil <= currentUnixTime) {      
@@ -383,7 +1080,6 @@ function DoControls() {
 }
 
 function DoControlsCallback(value) {
-    currentUnixTime = Math.floor(Date.now() / 1000);
     let schedule = null;
 
     // Valitaan aikataulu:
@@ -582,7 +1278,7 @@ function DoControlsCallback(value) {
 
 function updateVirtualState(switchId, state) {
     if (!relayStates[switchId]) {
-        relayStates[switchId] = { id: null, virtualState: 0, realState: 0, updated: false, checked: false };
+        relayStates[switchId] = { id: null, virtualState: 0, realState: 0, inputState: 0, updated: false, checked: false };
     }
 
     relayStates[switchId].virtualState = state;
@@ -623,13 +1319,41 @@ function CheckRelayStatesCallback(res, errCode, errMsg) {
     
     try {
         let switchId = parseInt(res.id);
+
+        // Päivitetään releen todellinen tila Shellyn raportin perusteella
         relayStates[switchId].realState = res.output ? 1 : 0;
+
+        // Luetaan mahdollisen ulkoisen kytkimen (input) tila, jos saatavilla
+        // 1 = kytkin päällä, 0 = kytkin pois päältä
+        let inputState = 0;
+        if (typeof res.input !== "undefined") {
+            inputState = res.input ? 1 : 0;
+        }
+
+        if (!relayStates[switchId]) {
+            relayStates[switchId] = { id: switchId, virtualState: 0, realState: 0, inputState: inputState, updated: false, checked: false };
+        } else {
+            relayStates[switchId].inputState = inputState;
+        }
+
         res = null;
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Updated state information for switch " + switchId +": virtual state: " + relayStates[switchId].virtualState + ", real state: " + relayStates[switchId].realState + ", updated: " + relayStates[switchId].updated + ", checked: " + relayStates[switchId].checked);
 
         if (relayStates[switchId].updated) {
             (CONFIG.logLevel <= LOG.DEBUG) && console.log("Virtual state updated for switch " + switchId + ", executing controls...");
             let state = relayStates[switchId].virtualState;
+
+            // Estetään releen sammuttaminen, jos ulkoinen kytkin on päällä.
+            // Toiseen suuntaan (releen kytkeminen päälle) muutos sallitaan aina.
+            if (state === 0 && relayStates[switchId].inputState === 1) {
+                let relay = switchId + 1;
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + relay + ": virtual OFF ignored because external switch is ON.");
+                // Merkitään tila tarkistetuksi, jotta skripti ei yritä jatkuvasti uudelleen.
+                relayStates[switchId].updated = false;
+                relayStates[switchId].checked = true;
+                return;
+            }
+
             enqueueTask("shellycall", "Switch.Set", { "id": switchId, "on": state === 1 ? true : false }, function() {
                 relayStates[switchId].updated = false;
                 let relay = switchId + 1;
@@ -641,6 +1365,16 @@ function CheckRelayStatesCallback(res, errCode, errMsg) {
         if ((!relayStates[switchId].checked) && (relayStates[switchId].virtualState !== relayStates[switchId].realState)) {
             (CONFIG.logLevel <= LOG.DEBUG) && console.log("State not updated correctly for switch " + switchId + ", executing controls...");
             let state = relayStates[switchId].virtualState;
+
+            // Estetään releen sammuttaminen, jos ulkoinen kytkin on päällä.
+            if (state === 0 && relayStates[switchId].inputState === 1) {
+                let relay = switchId + 1;
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Relay " + relay + ": virtual OFF ignored because external switch is ON.");
+                relayStates[switchId].updated = false;
+                relayStates[switchId].checked = true;
+                return;
+            }
+
             enqueueTask("shellycall", "Switch.Set", { "id": switchId, "on": state === 1 ? true : false }, function() {
                 relayStates[switchId].updated = false;
                 (CONFIG.logLevel <= LOG.INFO) && console.log("Switch " +  switchId + " set to state " +  state);   
@@ -664,6 +1398,14 @@ function CheckRelayStatesCallback(res, errCode, errMsg) {
 
 // Task queue
 function enqueueTask(type, method, params, callback) {
+    // Maksimikoko taskQueue:lle estää muistivuodot
+    const MAX_TASK_QUEUE_SIZE = 50;
+    
+    if (taskQueue.length >= MAX_TASK_QUEUE_SIZE) {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Task queue full (" + taskQueue.length + "), dropping oldest task.");
+        taskQueue.shift(); // Poistetaan vanhin tehtävä
+    }
+    
     taskQueue.push({ type: type, method: method, params: params, callback: callback || null });
     (CONFIG.logLevel <= LOG.DEBUG) && console.log("Tasks in queue: " + taskQueue.length);
     
@@ -748,6 +1490,83 @@ function sortFlatScheduleByTimestamp(schedule) {
         }
     }
     return schedule;
+}
+
+// Sähköauton latausaseman virtuaalikomponentin (kanava 201) käsittely
+function HandleEvVirtualComponent(channelData) {
+    // Tarkistetaan ensin, tukeeko laite virtuaalikomponentteja
+    if (typeof Shelly === "undefined" || typeof Shelly.addVirtualComponent !== "function") {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Virtual components are not supported on this firmware, skipping EV virtual switch handling.");
+        return;
+    }
+
+    let evEntry = null;
+
+    if (channelData && typeof channelData === "object") {
+        for (let i = 0; i < channelData.length; i++) {
+            let chEntry = channelData[i];
+            if (!chEntry || chEntry.id === undefined) continue;
+
+            let chId = parseInt(chEntry.id);
+            if (chId === evVirtualChannelId) {
+                evEntry = chEntry;
+                break;
+            }
+        }
+    }
+
+    // Jos kanava 201 ei tule ohjausdatan mukana, poistetaan mahdollinen virtuaalikomponentti
+    if (!evEntry) {
+        if (evVirtualSwitchId !== null) {
+            if (typeof Shelly.removeComponent === "function") {
+                try {
+                    Shelly.removeComponent(evVirtualSwitchId);
+                    (CONFIG.logLevel <= LOG.INFO) && console.log("EV virtual switch removed, id: " + evVirtualSwitchId);
+                } catch (e) {
+                    (CONFIG.logLevel <= LOG.ERROR) && console.log("Error removing EV virtual switch: " + e);
+                }
+            } else {
+                (CONFIG.logLevel <= LOG.WARN) && console.log("Shelly.removeComponent not available, cannot remove EV virtual switch with id: " + evVirtualSwitchId);
+            }
+        }
+
+        evVirtualSwitchId = null;
+        evVirtualState = null;
+        evVirtualName = null;
+        return;
+    }
+
+    // Täällä: ohjausdatan joukosta löytyi kanava 201
+    let desiredState = 0;
+    if (evEntry.state !== undefined) {
+        desiredState = parseInt(evEntry.state) ? 1 : 0;
+    }
+    let desiredName = evEntry.name || ("EV channel " + evVirtualChannelId);
+
+    // Luodaan virtuaalikomponentti, jos sitä ei ole vielä olemassa
+    if (evVirtualSwitchId === null) {
+        try {
+            let cfg = { name: desiredName };
+            evVirtualSwitchId = Shelly.addVirtualComponent("switch", cfg);
+            evVirtualName = desiredName;
+            (CONFIG.logLevel <= LOG.INFO) && console.log("EV virtual switch created, id: " + evVirtualSwitchId + ", name: " + desiredName);
+        } catch (e) {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Error creating EV virtual switch: " + e);
+            return;
+        }
+    } else if (desiredName && evVirtualName !== desiredName) {
+        // Nimen mahdollinen päivitys – ei yritetä muuttaa itse komponenttia, pidetään vain kirjaa
+        evVirtualName = desiredName;
+    }
+
+    // Päivitetään virtuaalikomponentin tila vain, jos se muuttuu
+    if (evVirtualSwitchId !== null && (evVirtualState === null || evVirtualState !== desiredState)) {
+        let onValue = desiredState === 1 ? true : false;
+        enqueueTask("shellycall", "Switch.Set", { id: evVirtualSwitchId, on: onValue }, function () {
+            evVirtualState = desiredState;
+            (CONFIG.logLevel <= LOG.INFO) && console.log("EV virtual switch set to state: " + desiredState);
+        });
+    }
 }
 
 // Failsafe logic
