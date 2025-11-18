@@ -1,0 +1,797 @@
+let VERSION = "Shelly-Registration-Test-1.0.0";
+
+// Settings
+let CONFIG = {
+    registrationApiEndpoint: "https://api.porssari.fi/device_registration.php",
+    logLevel: 0, // 0=debug, 1=info, 2=warn, 3=error
+};
+
+// Global variables
+let shellyApp, shellyMac, shellyFwVer, scriptId, storageType;
+let porssariRegistrationChecked = false;
+let porssariRegistrationPending = false;
+let porssariRegistrationComplete = false;
+let porssariCredentialsComponentsCreated = false;
+let estateId = null;
+let porssariMainEventHandler = null;
+let porssariCredentialsCheckTimer = null;
+
+// Task queue
+let taskQueue = [];
+let isTaskBusy = false;
+let isTaskDelay = false;
+
+// Logger
+const LOG = {
+    DEBUG: 0,
+    INFO: 1,
+    WARN: 2,
+    ERROR: 3
+};
+
+// Program init functions
+function init() {
+    (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri Registration Test Script, version: " + VERSION);
+    try {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Retrieving device information...");
+        enqueueTask('shellycall', 'Shelly.GetDeviceInfo', {}, InitCallback);
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("An error occurred while retrieving device information. Stopping script. " + e);
+        return;
+    }
+}
+
+function InitCallback(result) {
+    shellyApp = result.app;
+    shellyMac = result.mac;
+    shellyFwVer = result.ver;
+    result = null;
+    scriptId = (parseFloat(shellyFwVer) >= 1.5) ? Script.id : Shelly.getCurrentScriptId();
+    
+    if (shellyMac.length > 0) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Device info: device " + shellyApp + ", id " + shellyMac + ", firmware version " + shellyFwVer + ", script-id " + scriptId);
+    } else {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Could not get valid device information. Stopping script.");
+        return;
+    }
+
+    storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "None";
+
+    // Käynnistetään Pörssäri-rekisteröinnin tarkistus
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Starting Pörssäri registration process...");
+    InitPorssariRegistration();
+}
+
+// Rekisteröinnin onnistumisen ilmoitus
+function OnRegistrationComplete() {
+    porssariRegistrationComplete = true;
+    (CONFIG.logLevel <= LOG.INFO) && console.log("=== REGISTRATION COMPLETE ===");
+    (CONFIG.logLevel <= LOG.INFO) && console.log("estateId: " + estateId);
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Device successfully registered to Pörssäri!");
+}
+
+// Pörssäri-rekisteröintilogiikka
+function InitPorssariRegistration() {
+    if (porssariRegistrationChecked) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Registration already checked, skipping.");
+        return;
+    }
+
+    porssariRegistrationChecked = true;
+
+    // Jos rekisteröintirajapintaa ei ole määritelty, ei tehdä mitään
+    if (!CONFIG.registrationApiEndpoint || CONFIG.registrationApiEndpoint.length === 0) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri registration endpoint not configured, cannot proceed.");
+        return;
+    }
+
+    // Tarkistetaan löytyykö laite Pörssäri-palvelusta
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Checking if device is already registered in Pörssäri...");
+    CheckDeviceRegistrationInPorssari();
+}
+
+function CheckDeviceRegistrationInPorssari() {
+    try {
+        let urlToCall = CONFIG.registrationApiEndpoint;
+
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Checking Pörssäri registration status...");
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Registration URL: " + urlToCall);
+
+        // Lähetetään POST-pyyntö, jossa on deviceId ja Shellyn perustiedot
+        let postBody = JSON.stringify({
+            deviceId: shellyMac,
+            model: shellyApp,
+            firmwareVersion: shellyFwVer,
+            scriptVersion: VERSION
+        });
+
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("POST body: " + postBody);
+
+        enqueueTask("shellycall", "HTTP.POST", { 
+            "url": urlToCall, 
+            "timeout": 10, 
+            "ssl_ca": "*",
+            "headers": { "Content-Type": "application/json" },
+            "body": postBody
+        }, CheckDeviceRegistrationInPorssariCallback);
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while checking Pörssäri registration status: " + e);
+    }
+}
+
+function CheckDeviceRegistrationInPorssariCallback(res, errCode, errMsg) {
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("CheckDeviceRegistrationInPorssariCallback called");
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("errCode: " + errCode + ", errMsg: " + errMsg);
+    
+    if (errCode !== 0 || !res) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri registration check failed: " + errCode + " / " + errMsg);
+        if (res) {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Response object: " + JSON.stringify(res));
+        }
+        return;
+    }
+
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("HTTP response code: " + res.code);
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Response body: " + res.body);
+
+    try {
+        if (res.code !== 200) {
+            (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri registration status HTTP code: " + res.code);
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Device not found in Pörssäri, waiting for building id from LAN or user.");
+            
+            // Aloitetaan kuuntelemaan sisäverkosta kiinteistö-id:tä
+            StartListeningPorssariBuildingIdFromLan();
+            
+            // Testaus: luodaan virtuaalikomponentit heti 404-vastauksen jälkeen (voi poistaa myöhemmin)
+            // Jos haluat testata heti, poista alla olevan rivin kommentit:
+            // (CONFIG.logLevel <= LOG.INFO) && console.log("TEST: Creating credentials components immediately after 404 response.");
+            // CreatePorssariCredentialsVirtualComponents();
+            
+            return;
+        }
+
+        let body = JSON.parse(res.body);
+        res = null;
+
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Parsed JSON body: " + JSON.stringify(body));
+
+        // Odotettu muoto:
+        // { found: 1, building_id: "ABC123" } tai { found: 0 }
+        if (!body || typeof body !== "object") {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Invalid Pörssäri registration JSON.");
+            return;
+        }
+
+        let found = body.found !== undefined ? parseInt(body.found) : 0;
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("found: " + found);
+        
+        if (found === 1 && body.building_id) {
+            estateId = "" + body.building_id;
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: device already registered to estateId " + estateId + ".");
+
+            // Rekisteröidään vastaajaksi estateId-kyselyihin ja emittoidaan tieto kerran
+            StartEstateIdResponder();
+            EmitPorssariBuildingIdToLan();
+
+            // Rekisteröinti onnistui
+            OnRegistrationComplete();
+        } else {
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: device not registered, waiting for building id from LAN or user.");
+
+            // Aloitetaan kuuntelemaan sisäverkosta kiinteistö-id:tä
+            StartListeningPorssariBuildingIdFromLan();
+        }
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while parsing Pörssäri registration status: " + e);
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Exception details: " + e.stack);
+    }
+}
+
+// LAN-funktiot estateId:n välittämiseen
+function EmitPorssariBuildingIdToLan() {
+    if (!estateId) {
+        return;
+    }
+
+    if (typeof Shelly === "undefined" || typeof Shelly.emitEvent !== "function") {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri: Shelly.emitEvent not available, cannot emit estateId.");
+        return;
+    }
+
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: emitting estateId " + estateId + " via Shelly event.");
+
+    try {
+        Shelly.emitEvent("porssari_estate_id", {
+            estateId: estateId,
+            device_mac: shellyMac
+        });
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Event emitted successfully.");
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: exception while emitting estateId event: " + e);
+    }
+}
+
+function StartListeningPorssariBuildingIdFromLan() {
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: starting to listen for events...");
+
+    if (estateId) {
+        // Jos estateId on jo tiedossa, ei tarvitse kuunnella
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("estateId already available, skipping listener setup.");
+        return;
+    }
+
+    // Rekisteröidään yleinen event handler, jos se ei ole jo rekisteröity
+    if (!porssariMainEventHandler && typeof Shelly !== "undefined" && typeof Shelly.addEventHandler === "function") {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Registering main event handler for all Pörssäri events...");
+        porssariMainEventHandler = Shelly.addEventHandler(function (ev, userdata) {
+            try {
+                if (!ev || !ev.event) {
+                    return;
+                }
+
+                // Käsitellään text.change -tapahtumat (text-komponenttien muutokset)
+                if (ev.event === "text.change") {
+                    if (ev.data && (ev.data.id === 210 || ev.data.id === 211)) {
+                        (CONFIG.logLevel <= LOG.INFO) && console.log("Text.change event detected for text:" + ev.data.id);
+                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Event data: " + JSON.stringify(ev.data));
+                        
+                        // Lisätään pieni viive, jotta arvo ehtii tallentua
+                        Timer.set(500, false, function() {
+                            CheckCredentialsAndRegisterIfReady();
+                        });
+                    }
+                    return;
+                }
+
+                // Käsitellään porssari_estate_id -tapahtumat
+                if (ev.event === "porssari_estate_id") {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri event received: " + ev.event + " - " + JSON.stringify(ev));
+                    
+                    if (!ev.data || typeof ev.data.estateId === "undefined") {
+                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Event data missing or invalid.");
+                        return;
+                    }
+
+                    if (!estateId) {
+                        (CONFIG.logLevel <= LOG.INFO) && console.log("Received estateId from LAN event: " + ev.data.estateId);
+                        OnPorssariBuildingIdReceived(ev.data.estateId);
+                    } else {
+                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("estateId already set, ignoring event.");
+                    }
+                    return;
+                }
+
+                // Käsitellään porssari_estate_id_request -tapahtumat (vastataan jos meillä on estateId)
+                if (ev.event === "porssari_estate_id_request") {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri event received: " + ev.event);
+                    
+                    // Ei vastata omaan pyyntöön
+                    if (ev.data && ev.data.device_mac && ev.data.device_mac === shellyMac) {
+                        return;
+                    }
+
+                    // Vastataan estateId:llä jos meillä on se
+                    if (estateId) {
+                        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Answering estateId request with estateId " + estateId + ".");
+                        EmitPorssariBuildingIdToLan();
+                    }
+                    return;
+                }
+            } catch (e) {
+                (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error in main event handler: " + e);
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Exception details: " + e.stack);
+            }
+        });
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Main event handler registered successfully. Handler ID: " + porssariMainEventHandler);
+    }
+
+    // Lähetetään pyyntö estateId:n saamiseksi muilta laitteilta
+    if (typeof Shelly.emitEvent === "function") {
+        try {
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: emitting estateId request event.");
+            Shelly.emitEvent("porssari_estate_id_request", {
+                device_mac: shellyMac
+            });
+        } catch (e) {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error while emitting estateId request event: " + e);
+        }
+    }
+
+    // Jos estateId:tä ei saada tapahtumana 5 sekunnin kuluessa,
+    // luodaan virtuaalikomponentit käyttäjätunnuksen ja salaisen avaimen syöttämistä varten.
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Setting timer for 5 seconds to create credentials components if no estateId received.");
+    let timerId = Timer.set(5000, false, function () {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Timer callback executed. estateId: " + estateId + ", porssariCredentialsComponentsCreated: " + porssariCredentialsComponentsCreated);
+        if (!estateId && !porssariCredentialsComponentsCreated) {
+            (CONFIG.logLevel <= LOG.INFO) && console.log("No estateId received within 5 seconds, creating credentials virtual components.");
+            CreatePorssariCredentialsVirtualComponents();
+        } else {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Skipping credentials components creation - estateId: " + estateId + ", already created: " + porssariCredentialsComponentsCreated);
+        }
+    });
+    
+    if (!timerId) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Failed to set timer! Creating credentials components immediately.");
+        // Jos Timer.set epäonnistuu, luodaan komponentit heti
+        if (!estateId && !porssariCredentialsComponentsCreated) {
+            CreatePorssariCredentialsVirtualComponents();
+        }
+    } else {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Timer set successfully with ID: " + timerId);
+    }
+}
+
+function OnPorssariBuildingIdReceived(buildingId) {
+    if (!buildingId) {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("OnPorssariBuildingIdReceived called with empty buildingId.");
+        return;
+    }
+
+    estateId = "" + buildingId;
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: estateId received from LAN: " + estateId + ". Registering device for adoption.");
+
+    // Poistetaan kuuntelu estateId:n saamiseksi, koska se on nyt saatavilla
+    CleanupEstateIdListener();
+
+    // Kun estateId on saatu, rekisteröidään vastaajaksi tuleviin pyyntöihin
+    StartEstateIdResponder();
+
+    RegisterDeviceForAdoptionInPorssari();
+}
+
+// Laite, jolla on estateId, vastaa estateId-pyyntöihin
+// Tämä käsitellään nyt yleisessä event handlerissa, ei tarvita erillistä funktiota
+function StartEstateIdResponder() {
+    // Yleinen event handler käsittelee jo porssari_estate_id_request -tapahtumat
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("EstateId responder functionality is handled by main event handler.");
+}
+
+function RegisterDeviceForAdoptionInPorssari() {
+    if (!estateId) {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri: cannot register device for adoption, estateId missing.");
+        return;
+    }
+
+    if (porssariRegistrationPending) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Registration already pending, skipping.");
+        return;
+    }
+    porssariRegistrationPending = true;
+
+    try {
+        let urlToCall = CONFIG.registrationApiEndpoint;
+
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: registering device for adoption, estateId " + estateId + "...");
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri registration URL: " + urlToCall);
+
+        // Lähetetään POST-pyyntö, jossa on deviceId, estateId ja Shellyn perustiedot
+        let postBody = JSON.stringify({
+            deviceId: shellyMac,
+            estateId: estateId,
+            model: shellyApp,
+            firmwareVersion: shellyFwVer,
+            scriptVersion: VERSION
+        });
+
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("POST body: " + postBody);
+
+        enqueueTask("shellycall", "HTTP.POST", { 
+            "url": urlToCall, 
+            "timeout": 10, 
+            "ssl_ca": "*",
+            "headers": { "Content-Type": "application/json" },
+            "body": postBody
+        }, RegisterDeviceForAdoptionInPorssariCallback);
+    } catch (e) {
+        porssariRegistrationPending = false;
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while registering device for adoption in Pörssäri: " + e);
+    }
+}
+
+function RegisterDeviceForAdoptionInPorssariCallback(res, errCode, errMsg) {
+    porssariRegistrationPending = false;
+
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("RegisterDeviceForAdoptionInPorssariCallback called");
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("errCode: " + errCode + ", errMsg: " + errMsg);
+
+    if (errCode !== 0 || !res) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri adoption registration failed: " + errCode + " / " + errMsg);
+        if (res) {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Response object: " + JSON.stringify(res));
+        }
+        return;
+    }
+
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("HTTP response code: " + res.code);
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Response body: " + res.body);
+
+    try {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri adoption registration response code: " + res.code);
+        
+        // Jos rekisteröinti onnistui, poistetaan virtuaalikomponentit jos ne on luotu
+        if (res.code === 200 && estateId) {
+            CleanupPorssariCredentialsComponents();
+            OnRegistrationComplete();
+        } else {
+            (CONFIG.logLevel <= LOG.WARN) && console.log("Adoption registration returned non-200 code: " + res.code);
+        }
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while handling Pörssäri adoption registration response: " + e);
+    }
+}
+
+// Virtuaalikomponentit Pörssäri-käyttäjätunnusta ja salaista avainta varten
+function CreatePorssariCredentialsVirtualComponents() {
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("CreatePorssariCredentialsVirtualComponents called");
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("porssariCredentialsComponentsCreated: " + porssariCredentialsComponentsCreated);
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("estateId: " + estateId);
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("typeof Virtual: " + typeof Virtual);
+    
+    if (porssariCredentialsComponentsCreated) {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Credentials components already created, skipping.");
+        return;
+    }
+
+    // Jos laite on jo liitetty kiinteistöön, ei tarvita cred-komponentteja
+    if (estateId) {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("estateId already available (" + estateId + "), skipping credentials components.");
+        return;
+    }
+
+    if (typeof Shelly === "undefined" || typeof Shelly.call !== "function") {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: Shelly.call is not available, cannot create credentials components.");
+        return;
+    }
+
+    // Käytetään tekstityyppisiä virtuaalikomponentteja ID-alueelta 200–299
+    //  - porssari_username: text:210
+    //  - porssari_secret:   text:211
+
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Creating virtual components for username and secret...");
+
+    // Luodaan username-komponentti
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling Shelly.call('Virtual.Add') for username component (text:210)...");
+    enqueueTask("shellycall", "Virtual.Add", {
+        type: "text",
+        config: { 
+            name: "porssari_username",
+            meta: {
+                ui: {
+                    view: "field"
+                }
+            }
+        },
+        id: 210
+    }, function(res, errCode, errMsg) {
+        if (errCode !== 0 || !res) {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Failed to create username virtual component: " + errCode + " / " + errMsg);
+            return;
+        }
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Username component created: " + JSON.stringify(res));
+        
+        // Luodaan secret-komponentti
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling Shelly.call('Virtual.Add') for secret component (text:211)...");
+        enqueueTask("shellycall", "Virtual.Add", {
+            type: "text",
+            config: { 
+                name: "porssari_secret",
+                meta: {
+                    ui: {
+                        view: "field"
+                    }
+                }
+            },
+            id: 211
+        }, function(res, errCode, errMsg) {
+            if (errCode !== 0 || !res) {
+                (CONFIG.logLevel <= LOG.ERROR) && console.log("Failed to create secret virtual component: " + errCode + " / " + errMsg);
+                return;
+            }
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Secret component created: " + JSON.stringify(res));
+            
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: virtual components for username and secret created (text:210, text:211).");
+            
+            // Rekisteröidään status handler, joka kuuntelee virtuaalikomponenttien muutoksia
+            StartListeningPorssariCredentialsChanges();
+            
+            porssariCredentialsComponentsCreated = true;
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Credentials components creation completed successfully.");
+            
+            // Tarkistetaan heti kenttien tila, jos ne on jo täytetty
+            CheckCredentialsAndRegisterIfReady();
+        });
+    });
+}
+
+// Tarkistetaan kenttien tila ja rekisteröidään laite jos molemmat kentät on täytetty
+function CheckCredentialsAndRegisterIfReady() {
+    if (estateId || porssariRegistrationPending) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("CheckCredentialsAndRegisterIfReady: skipping - estateId: " + estateId + ", pending: " + porssariRegistrationPending);
+        return;
+    }
+    
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Checking credentials status...");
+    
+    // Luetaan kenttien arvot suoraan Text API:sta
+    enqueueTask("shellycall", "Text.GetStatus", { id: 210 }, function(res, errCode, errMsg) {
+        let username = null;
+        if (errCode !== 0 || !res) {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Failed to get username status: " + errCode + " / " + errMsg);
+        } else {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Username status response: " + JSON.stringify(res));
+            if (res.value) {
+                username = res.value;
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Username found: " + username);
+            } else {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Username is empty");
+            }
+        }
+        
+        enqueueTask("shellycall", "Text.GetStatus", { id: 211 }, function(res, errCode, errMsg) {
+            let passcode = null;
+            if (errCode !== 0 || !res) {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Failed to get passcode status: " + errCode + " / " + errMsg);
+            } else {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Passcode status response: " + JSON.stringify(res));
+                if (res.value) {
+                    passcode = res.value;
+                    (CONFIG.logLevel <= LOG.INFO) && console.log("Passcode found: " + (passcode ? passcode.length + " chars" : "empty"));
+                } else {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Passcode is empty");
+                }
+            }
+            
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Credentials check result - username: " + (username ? "SET (" + username + ")" : "EMPTY") + ", passcode: " + (passcode ? "SET (" + passcode.length + " chars)" : "EMPTY"));
+            
+            if (username && passcode && !estateId && !porssariRegistrationPending) {
+                (CONFIG.logLevel <= LOG.INFO) && console.log("=== Both credentials found! Starting registration... ===");
+                RegisterDeviceWithCredentialsInPorssari(username, passcode);
+            } else {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Registration not triggered - username: " + (username ? "yes" : "no") + ", passcode: " + (passcode ? "yes" : "no") + ", estateId: " + estateId + ", pending: " + porssariRegistrationPending);
+            }
+        });
+    });
+}
+
+// Kuunnellaan virtuaalikomponenttien muutoksia (käyttäjätunnus ja passcode)
+// Yleinen event handler käsittelee jo text.change -tapahtumat, tarvitaan vain timer
+function StartListeningPorssariCredentialsChanges() {
+    // Lisätään säännöllinen tarkistus (joka 60 sekuntia) fallback-logikkana
+    // Tämä varmistaa että rekisteröinti käynnistyy vaikka event handlerit eivät toimi
+    if (!porssariCredentialsCheckTimer) {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Starting periodic credentials check (every 60 seconds) as fallback...");
+        porssariCredentialsCheckTimer = Timer.set(60000, true, function() {
+            if (!estateId && !porssariRegistrationPending) {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Periodic credentials check (fallback)...");
+                CheckCredentialsAndRegisterIfReady();
+            }
+        });
+    }
+}
+
+// Rekisteröidään laite käyttäjätunnuksen ja passcode:n avulla
+function RegisterDeviceWithCredentialsInPorssari(username, passcode) {
+    if (!username || !passcode) {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri: cannot register device, username or passcode missing.");
+        return;
+    }
+
+    if (porssariRegistrationPending) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Registration already pending, skipping.");
+        return;
+    }
+    porssariRegistrationPending = true;
+
+    try {
+        let urlToCall = CONFIG.registrationApiEndpoint;
+
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: registering device with credentials...");
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri registration URL: " + urlToCall);
+
+        // Lähetetään POST-pyyntö, jossa on deviceId, username, passcode ja Shellyn perustiedot
+        let postBody = JSON.stringify({
+            deviceId: shellyMac,
+            username: username,
+            passcode: passcode,
+            model: shellyApp,
+            firmwareVersion: shellyFwVer,
+            scriptVersion: VERSION
+        });
+
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("POST body (without credentials): " + JSON.stringify({
+            deviceId: shellyMac,
+            username: "[REDACTED]",
+            passcode: "[REDACTED]",
+            model: shellyApp,
+            firmwareVersion: shellyFwVer,
+            scriptVersion: VERSION
+        }));
+
+        enqueueTask("shellycall", "HTTP.POST", { 
+            "url": urlToCall, 
+            "timeout": 10, 
+            "ssl_ca": "*",
+            "headers": { "Content-Type": "application/json" },
+            "body": postBody
+        }, RegisterDeviceWithCredentialsCallback);
+    } catch (e) {
+        porssariRegistrationPending = false;
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while registering device with credentials in Pörssäri: " + e);
+    }
+}
+
+function RegisterDeviceWithCredentialsCallback(res, errCode, errMsg) {
+    porssariRegistrationPending = false;
+
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("RegisterDeviceWithCredentialsCallback called");
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("errCode: " + errCode + ", errMsg: " + errMsg);
+
+    if (errCode !== 0 || !res) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri credentials registration failed: " + errCode + " / " + errMsg);
+        if (res) {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Response object: " + JSON.stringify(res));
+        }
+        return;
+    }
+
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("HTTP response code: " + res.code);
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Response body: " + res.body);
+
+    try {
+        if (res.code === 200) {
+            let body = JSON.parse(res.body);
+            res = null;
+
+            // Odotettu muoto: { estateId: "ABC123" } tai vastaava
+            if (body && body.estateId) {
+                estateId = "" + body.estateId;
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: device registered successfully, estateId: " + estateId + ".");
+
+                // Poistetaan turhat listenerit ja virtuaalikomponentit, koska rekisteröinti onnistui
+                CleanupEstateIdListener();
+                CleanupPorssariCredentialsComponents();
+
+                // Rekisteröidään vastaajaksi estateId-kyselyihin
+                StartEstateIdResponder();
+                EmitPorssariBuildingIdToLan();
+
+                // Rekisteröinti onnistui
+                OnRegistrationComplete();
+            } else {
+                (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri credentials registration response code 200 but no estateId in body.");
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Response body: " + JSON.stringify(body));
+            }
+        } else {
+            (CONFIG.logLevel <= LOG.WARN) && console.log("Pörssäri credentials registration response code: " + res.code);
+        }
+    } catch (e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error while handling Pörssäri credentials registration response: " + e);
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Exception details: " + e.stack);
+    }
+}
+
+// Poistetaan estateId:n kuuntelu, koska se on nyt saatavilla
+// Yleinen event handler pysyy käytössä, koska se käsittelee myös muita tapahtumia
+function CleanupEstateIdListener() {
+    // Yleinen event handler pysyy käytössä, koska se käsittelee myös text.change -tapahtumia
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("EstateId listener cleanup - main event handler stays active for text.change events.");
+}
+
+// Poistetaan virtuaalikomponentit ja credentials handlerit, koska rekisteröinti onnistui
+function CleanupPorssariCredentialsComponents() {
+    // Yleinen event handler pysyy käytössä, koska se käsittelee myös muita tapahtumia
+    // (esim. estateId-pyyntöihin vastaaminen)
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Credentials components cleanup - main event handler stays active.");
+
+    // Poistetaan säännöllinen tarkistustimer
+    if (porssariCredentialsCheckTimer) {
+        try {
+            Timer.clear(porssariCredentialsCheckTimer);
+            porssariCredentialsCheckTimer = null;
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri: credentials check timer removed.");
+        } catch (e) {
+            (CONFIG.logLevel <= LOG.ERROR) && console.log("Pörssäri: error removing credentials check timer: " + e);
+        }
+    }
+
+    // Poistetaan virtuaalikomponentit jos ne on luotu
+    if (porssariCredentialsComponentsCreated && typeof Shelly !== "undefined" && typeof Shelly.call === "function") {
+        // Poistetaan username-komponentti (text:210)
+        enqueueTask("shellycall", "Virtual.Remove", { id: "text:210" }, function(res, errCode, errMsg) {
+            if (errCode === 0) {
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: virtual component text:210 (username) removed.");
+            } else {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri: error removing username component (may not exist): " + errCode + " / " + errMsg);
+            }
+        });
+
+        // Poistetaan secret-komponentti (text:211)
+        enqueueTask("shellycall", "Virtual.Remove", { id: "text:211" }, function(res, errCode, errMsg) {
+            if (errCode === 0) {
+                (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: virtual component text:211 (secret) removed.");
+            } else {
+                (CONFIG.logLevel <= LOG.DEBUG) && console.log("Pörssäri: error removing secret component (may not exist): " + errCode + " / " + errMsg);
+            }
+            
+            porssariCredentialsComponentsCreated = false;
+            porssariUsernameHandle = null;
+            porssariSecretHandle = null;
+        });
+    } else if (porssariCredentialsComponentsCreated) {
+        // Jos Shelly.call ei ole saatavilla, merkitään vain että komponentit on poistettu
+        porssariCredentialsComponentsCreated = false;
+        porssariUsernameHandle = null;
+        porssariSecretHandle = null;
+    }
+}
+
+// Task queue
+function enqueueTask(type, method, params, callback) {
+    // Maksimikoko taskQueue:lle estää muistivuodot
+    const MAX_TASK_QUEUE_SIZE = 50;
+    
+    if (taskQueue.length >= MAX_TASK_QUEUE_SIZE) {
+        (CONFIG.logLevel <= LOG.WARN) && console.log("Task queue full (" + taskQueue.length + "), dropping oldest task.");
+        taskQueue.shift(); // Poistetaan vanhin tehtävä
+    }
+    
+    taskQueue.push({ type: type, method: method, params: params, callback: callback || null });
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Tasks in queue: " + taskQueue.length);
+    
+    if (!isTaskBusy && !isTaskDelay) {
+        processTaskQueue();
+    }
+}
+
+// Prosessoidaan työjono
+function processTaskQueue() {
+    if (isTaskBusy || taskQueue.length === 0) {
+        isTaskDelay = false;
+        return;
+    }
+
+    isTaskBusy = true;
+    try {
+        let taskToExecute = taskQueue[0];
+        taskQueue.splice(0, 1); 
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Running task: " + taskToExecute.method + " with params: " + JSON.stringify(taskToExecute.params));
+
+        if (taskToExecute.type === "shellycall") {
+            Shelly.call(taskToExecute.method, taskToExecute.params, function (res, errCode, errMsg) {
+                if (taskToExecute.callback) {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling callback for " + taskToExecute.method);
+                    taskToExecute.callback(res, errCode, errMsg);
+                    taskToExecute.callback = null;
+                } else {
+                    (CONFIG.logLevel <= LOG.DEBUG) && console.log("No callback found for task: " + taskToExecute.method);
+                }
+                isTaskBusy = false;
+                handleTaskQueueDelay(taskToExecute);
+            });
+        } else {
+            (CONFIG.logLevel <= LOG.DEBUG) && console.log("Unknown task type: " + taskToExecute.type);
+            isTaskBusy = false;
+            handleTaskQueueDelay(taskToExecute);
+        }
+    } catch(e) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Error with task: " + taskToExecute.method + " with params: " + JSON.stringify(taskToExecute.params) + ": " + e);
+        isTaskBusy = false;
+        processTaskQueue()
+    }
+}
+
+function handleTaskQueueDelay(task) {
+    if (taskQueue.length === 0) {
+        task = null;
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("All tasks has been done.");
+        return;
+    }
+
+    // Ei tarvita Switch.Set viiveitä rekisteröintitestissä
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Processing next task in queue.");
+    processTaskQueue();
+}
+
+// Start program
+init()
+

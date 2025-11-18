@@ -43,6 +43,7 @@ let evVirtualName = null;
 let estateId = null;
 let porssariRegistrationChecked = false;
 let porssariRegistrationPending = false;
+let porssariRegistrationComplete = false;
 let porssariCredentialsComponentsCreated = false;
 let estateIdEventHandler = null;
 let estateIdRequestHandler = null;
@@ -86,22 +87,42 @@ function InitCallback(result) {
 
     storageType = parseFloat(shellyFwVer) >= 1.5 ? "ScriptStorage" : "None";
 
-    // Käynnistetään Pörssäri-rekisteröinnin tarkistus rinnalla
+    // Käynnistetään Pörssäri-rekisteröinnin tarkistus
+    // Ohjaustimer ja localstoragen lataus käynnistetään vasta rekisteröinnin onnistuttua
     InitPorssariRegistration();
-    
-    // Program loop timer
-    mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
-    if (!mainTimer) {
-        (CONFIG.logLevel <= LOG.ERROR) && console.log("Main timer not initialized. Stopping script.");
-    } else {
-        (CONFIG.logLevel <= LOG.INFO) && console.log("Program loop timer initialized");
-    }
-    
-    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Calling startup function in 1 seconds: Load controls data from storage.");
-    Timer.set(1000, false, LoadSavedControldata);
     
     // Ohjausdatan pollaus aloitetaan vasta kun estateId on saatavilla (joko rekisteröintirajapinnasta tai LAN-eventistä)
     // Ei kutsuta RequestControldata() tässä vaiheessa
+}
+
+// Käynnistetään ohjausjärjestelmä rekisteröinnin onnistuttua
+function StartControlSystem() {
+    // Estetään useamman kerran käynnistys
+    if (porssariRegistrationComplete) {
+        (CONFIG.logLevel <= LOG.DEBUG) && console.log("Control system already started, skipping.");
+        return;
+    }
+
+    if (!estateId) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Cannot start control system: estateId not available.");
+        return;
+    }
+
+    porssariRegistrationComplete = true;
+    (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: registration complete, starting control system.");
+
+    // Käynnistetään ohjaustimer
+    mainTimer = Timer.set(CONFIG.updatePeriod, true, MainCycle);
+    if (!mainTimer) {
+        (CONFIG.logLevel <= LOG.ERROR) && console.log("Main timer not initialized. Stopping script.");
+        return;
+    } else {
+        (CONFIG.logLevel <= LOG.INFO) && console.log("Program loop timer initialized");
+    }
+
+    // Ladataan ohjaustiedot localstoragesta
+    (CONFIG.logLevel <= LOG.DEBUG) && console.log("Loading controls data from storage...");
+    LoadSavedControldata();
 }
 
 // Local data functions
@@ -117,6 +138,12 @@ function LoadSavedControldata() {
 function LoadSavedControldataCallback(result) {
     if (!result) {
         (CONFIG.logLevel <= LOG.INFO) && console.log("Saved control data not found from local storage.");
+        // Jos rekisteröinti on valmis mutta dataa ei löydy, aloitetaan pollaus
+        if (porssariRegistrationComplete && estateId) {
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Registration complete, starting control data polling.");
+            controlsReady = false;
+            RequestControldata();
+        }
         return;
     }
     
@@ -141,8 +168,21 @@ function LoadSavedControldataCallback(result) {
 
         // Yritetään ladata virtuaaliaika ScriptStoragesta, jos se on talletettu aiemmin
         LoadVirtualTimeFromStorage();
+
+        // Jos rekisteröinti on valmis, aloitetaan ohjausdatan pollaus
+        if (porssariRegistrationComplete && estateId) {
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Registration complete, starting control data polling.");
+            controlsReady = false;
+            RequestControldata();
+        }
     } catch (e) {
         (CONFIG.logLevel <= LOG.DEBUG) && console.log("Saved control data not found from local storage: " + e);
+        // Jos rekisteröinti on valmis mutta dataa ei löydy, aloitetaan pollaus
+        if (porssariRegistrationComplete && estateId) {
+            (CONFIG.logLevel <= LOG.INFO) && console.log("Registration complete, starting control data polling.");
+            controlsReady = false;
+            RequestControldata();
+        }
     }
 }
 
@@ -326,10 +366,8 @@ function CheckDeviceRegistrationInPorssariCallback(res, errCode, errMsg) {
             StartEstateIdResponder();
             EmitPorssariBuildingIdToLan();
 
-            // Nyt kun estateId on saatavilla, voidaan aloittaa varsinaisen ohjausrajapinnan pollaus
-            (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: estateId available, starting control data polling.");
-            controlsReady = false;
-            RequestControldata();
+            // Rekisteröinti onnistui, käynnistetään ohjausjärjestelmä
+            StartControlSystem();
         } else {
             (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: device not registered, waiting for building id from LAN or user.");
 
@@ -435,10 +473,8 @@ function OnPorssariBuildingIdReceived(buildingId) {
 
     RegisterDeviceForAdoptionInPorssari();
 
-    // Nyt kun estateId on saatavilla, voidaan aloittaa varsinaisen ohjausrajapinnan pollaus
-    (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: estateId available, starting control data polling.");
-    controlsReady = false;
-    RequestControldata();
+    // Rekisteröinti onnistui, käynnistetään ohjausjärjestelmä
+    StartControlSystem();
 }
 
 // Laite, jolla on estateId, vastaa estateId-pyyntöihin
@@ -698,10 +734,8 @@ function RegisterDeviceWithCredentialsCallback(res, errCode, errMsg) {
                 StartEstateIdResponder();
                 EmitPorssariBuildingIdToLan();
 
-                // Nyt kun estateId on saatavilla, voidaan aloittaa varsinaisen ohjausrajapinnan pollaus
-                (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri: estateId available, starting control data polling.");
-                controlsReady = false;
-                RequestControldata();
+                // Rekisteröinti onnistui, käynnistetään ohjausjärjestelmä
+                StartControlSystem();
             } else {
                 (CONFIG.logLevel <= LOG.INFO) && console.log("Pörssäri credentials registration response code: " + res.code);
             }
